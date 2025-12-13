@@ -18,15 +18,26 @@ class AsyncClient;
 class AsyncServer {
 public:
     AsyncServer(ip_addr_t addr, uint16_t port);
-    AsyncServer(uint16_t port);
+    AsyncServer(uint16_t port) : AsyncServer(IPADDR4_INIT(0), port) {}
     ~AsyncServer() {
         end();
+        if (recycleTimer_) {
+            xTimerDelete(recycleTimer_, 0);
+            Clean(true);
+        }
     }
 
     void begin();
     void end();
-    AsyncClient* allocateClient(AsyncServer* server, tcp_pcb* pcb);
-    void recycleClient(AsyncClient* c);
+    AsyncClient* allocateClient(tcp_pcb* pcb);
+    /// @brief 回收TCP连接
+    void recycleClient(AsyncClient* c) {
+        AsyncClient* expected;
+        do {
+            expected = pool_.load();
+            c->next_ = expected;
+        } while (!pool_.compare_exchange_weak(expected, c));
+    }
     /// @brief 设置建立连接的客户端默认是否采取延迟改善策略
     void set_nodelay(bool nodelay) {
         nodelay_ = nodelay;
@@ -60,8 +71,8 @@ private:
         uint16_t                port;
     };
 
-
-    err_t   bind();
+    void Clean(bool clean_all=false);
+    err_t bind();
 
     bool                nodelay_{false};
     uint16_t            port_;
