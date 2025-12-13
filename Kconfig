@@ -1,0 +1,18 @@
+menu "my_AsyncTCP"
+    config SERVER_BACKLOG_LEN
+        int "服务器监听时，等待连接最大长度"
+        default 32
+    config CONNECT_TIMEOUT
+        int "客户端连接等待超时（秒）"
+        default 10
+        help 
+            "服务器在指定时间内无法处理时拒绝连接"
+    config ASYNC_MAX_ACK_TIME
+        int "设置ACK应答时间（毫秒）"
+        default 5000
+    config CONNECTION_CLEAN_TIME
+        int "连接清理时间（秒）"
+        default 30
+        help 
+            "连接会在指定的时间内进行重用"
+endmenu

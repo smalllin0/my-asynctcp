@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS 
+        "src/AsyncClient.cc"
+        "src/AsyncServer.cc"
+        "src/async.cc"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        "lwip"
+        "freertos"
+        "esp_netif"
+        "my-background"
+)
