@@ -153,7 +153,7 @@ private:
     };
 
     struct lwip_data_t {
-        tcpip_api_call_data data;
+        tcpip_api_call_data* data;
         tcp_pcb*    pcb;
         union {
             struct {
