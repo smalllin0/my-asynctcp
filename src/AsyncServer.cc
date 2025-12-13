@@ -11,68 +11,42 @@ AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
     , bg_(MyBackground::GetInstance())
 {
     recycleTimer_ = xTimerCreate(
-        "Client Del",
+        "TCP Clean Timer",
         pdMS_TO_TICKS(1000 * 30),       // 30s清理1次
         pdFALSE,
         (void*) this,
         [](TimerHandle_t xTimer) {
-            auto* this_ = reinterpret_cast<AsyncServer*>(pvTimerGetTimerID(xTimer));
-            // 清理上层资源
-            if (this_->on_clean_handler_) {
-                this_->on_clean_handler_(this_->on_clean_arg_);
-            }
-
-            // 清理本资源(保留一个)
-            auto* head = this_->pool_.exchange(nullptr);
-            if (head != nullptr) {
-                auto* current = head->next_;
-                while (current) {
-                    auto* next = current->next_;
-                    delete current;
-                    current = next;
-                }
-                head->next_ = nullptr;
-                this_->recycleClient(head);
-            }
-            ESP_LOGI(TAG, "连接已被清理.");
+            auto* self = reinterpret_cast<AsyncServer*>(pvTimerGetTimerID(xTimer));
+            self->Clean();
         }
     );
 }
 
-AsyncServer::AsyncServer(uint16_t port)
-    : port_(port)
-    , bg_(MyBackground::GetInstance())
+void AsyncServer::Clean(bool clean_all)
 {
-    addr_ =  IPADDR4_INIT(0);
-    recycleTimer_ = xTimerCreate(
-        "Client Del",
-        pdMS_TO_TICKS(1000 * 30),       // 30s清理1次
-        pdFALSE,
-        (void*) this,
-        [](TimerHandle_t xTimer) {
-            auto* this_ = reinterpret_cast<AsyncServer*>(pvTimerGetTimerID(xTimer));
-            // 清理上层资源
-            if (this_->on_clean_handler_) {
-                this_->on_clean_handler_(this_->on_clean_arg_);
-            }
+    // 调用上层清理回调清理上层资源
+    if (on_clean_handler_) {
+        on_clean_handler_(on_clean_arg_);
+    }
 
-            // 清理本资源(保留一个)
-            auto* head = this_->pool_.exchange(nullptr);
-            if (head == nullptr || head->next_ == nullptr) {
-                return;
-            }
-            
-            auto* current = head->next_;
-            while (current) {
-                auto* next = current->next_;
-                delete current;
-                current = next;
-            }
-            head->next_ = nullptr;
-            this_->recycleClient(head);
-            ESP_LOGI(TAG, "连接已被清理.");
+    // 清理本层资源
+    auto* head = pool_.exchange(nullptr);
+    if (head != nullptr) {
+        auto* current = head->next_;
+        while (current) {
+            auto* next = current->next_;
+            delete current;
+            current = next;
         }
-    );
+        head->next_ = nullptr;
+        if (!clean_all) {
+            recycleClient(head);
+            ESP_LOGI(TAG, "连接已被清理.");
+        } else {
+            delete head;
+            ESP_LOGI(TAG, "连接已被清理完毕.");
+        }
+    }
 }
 
 /// @brief 启动TCP服务器
@@ -122,7 +96,7 @@ void AsyncServer::begin()
             return ERR_ABRT;
         }
         auto* this_ = reinterpret_cast<AsyncServer*>(arg);
-        auto* client = this_->allocateClient(this_, pcb);
+        auto* client = this_->allocateClient(pcb);
         client->set_nodelay(this_->nodelay_);
 
         if (this_->on_connected_handler_) {
@@ -170,7 +144,10 @@ err_t AsyncServer::bind()
         (tcpip_api_call_data*)&msg);
 }
 
-AsyncClient* AsyncServer::allocateClient(AsyncServer* server, tcp_pcb* pcb)
+/// @brief 申请TCP连接
+/// @param pcb 
+/// @return 
+AsyncClient* AsyncServer::allocateClient(tcp_pcb* pcb)
 {
     AsyncClient* client;
     AsyncClient* expected;
@@ -185,15 +162,6 @@ AsyncClient* AsyncServer::allocateClient(AsyncServer* server, tcp_pcb* pcb)
     } while (! pool_.compare_exchange_weak(expected, client->next_));
 
     xTimerReset(recycleTimer_, 0);
-    client->init(server, pcb);
+    client->init(this, pcb);
     return client;
-}
-
-void AsyncServer::recycleClient(AsyncClient* c) 
-{
-    AsyncClient* expected;
-    do {
-        expected = pool_.load();
-        c->next_ = expected;
-    } while (!pool_.compare_exchange_weak(expected, c));
 }
