@@ -346,7 +346,7 @@ bool AsyncClient::connect(ip_addr_t& addr, uint16_t port)
     init(nullptr, pcb_);
 
     lwip_data_t msg = {
-        .data = {0},
+        .data = nullptr,
         .pcb = pcb_,
         .addr = &addr,
         .port = port,
@@ -424,7 +424,7 @@ size_t AsyncClient::add(const void* data, size_t size, uint8_t apiflags)
     uint16_t will_send = room > size ? size : room;
 
     lwip_data_t msg = {
-        .data = {0},
+        .data = nullptr,
         .pcb = pcb_,
         .write_apiflag = apiflags,
         .write_len = will_send,
