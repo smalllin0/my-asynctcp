@@ -1,9 +1,9 @@
 description: 异步TCP组件
 license: Apache 2.0
 repository: https://github.com/smalllin0/my-asynctcp.git
-version: 1.0.4
+version: 1.1.0
 dependencies:
   idf: '>=5.4'
-  smallin/my-background: '>=1.0.4'
-  smallin/my-linklist: '>=1.0.2'
-  smallin/my-sysinfo: ^1.0.0
+  smallin/my-background: '>=1.1.0'
+  smallin/my-linklist: '>=1.1.0'
+  smallin/my-sysinfo: '>=1.0.0'
