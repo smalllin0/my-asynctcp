@@ -153,21 +153,20 @@ private:
     };
 
     struct lwip_data_t {
-        tcpip_api_call_data* data;
-        tcp_pcb*    pcb;
-        union {
-            struct {
-                ip_addr_t*  addr;
-                uint16_t    port;
-                tcp_connected_fn    fn;
-            };
-            struct 
-            {
-                uint8_t     write_apiflag;
-                uint16_t            write_len;
-                const void*         write_data;
-            };
+      tcpip_api_call_data   data;
+      tcp_pcb*              pcb;
+      union {
+        struct {
+          uint16_t          port;
+          ip_addr_t*        addr;
+          tcp_connected_fn  fn;
         };
+        struct {
+          uint8_t       write_apiflag;
+          uint16_t      write_len;
+          const void*   write_data;
+        };
+      };
     };
 
     void init(AsyncServer* server, tcp_pcb* pcb);
