@@ -136,20 +136,19 @@ private:
     friend class AsyncServer;
     
     struct async_event_t {
-        void*   arg;
-        union 
-        {
-            struct {
-                pbuf*   buf;
-                uint16_t    tot_len = 0;
-            };
-            err_t     err;
-            struct {
-                uint32_t    time;
-                uint16_t    len;
-            };
-            uint32_t    poll_time;
+      void*         arg;
+      union {
+        err_t       err;
+        uint32_t    poll_time;
+        struct {
+          uint16_t  tot_len{0};
+          pbuf*     buf;
         };
+        struct {
+          uint16_t  len;
+          uint32_t  time;
+        };
+      };
     };
 
     struct lwip_data_t {
