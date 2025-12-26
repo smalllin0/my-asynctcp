@@ -156,7 +156,7 @@ void AsyncClient::HandleReceiveEvent(tcp_pcb* pcb, pbuf* pb)
             auto* event = reinterpret_cast<async_event_t*>(arg);
             auto* self = reinterpret_cast<AsyncClient*>(event->arg);
             auto* pb = event->buf;
-            auto tot_len = pb->tot_len;
+            auto tot_len = event->tot_len;
             if (tot_len) {
                 if (self->defer_ack_) {
                     self->unack_rx_bytes_ += tot_len;
