@@ -66,8 +66,6 @@ bool AsyncClient::IsSendding()
 
 void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
 {
-    events_.store(0);
-    closed_flag_.store(false);
     unack_rx_bytes_ = 0;
     last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
     last_tx_timestamp_ = last_rx_timestamp_;
@@ -85,7 +83,7 @@ void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
     on_data_received_handler = nullptr;
     on_timeout_handler      = nullptr;
     on_poll_handler         = nullptr;
-    on_recycle_handler       = nullptr;
+    on_recycle_handler      = nullptr;
 
     on_connected_arg    = nullptr;
     on_disconnected_arg = nullptr;
@@ -96,21 +94,20 @@ void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
     on_poll_arg         = nullptr;
     on_recycle_arg      = nullptr;
 
-
     tcp_arg(pcb_, this);
     tcp_recv(pcb_, [](void* arg, tcp_pcb* pcb, pbuf* pb, err_t err) ->err_t {
         auto* self = reinterpret_cast<AsyncClient*>(arg);
         if (pb) {
-            self->HandleReceiveEvent(pcb, pb);
+            self->HandleReceiveEvent(pb);
         } else {
             self->close();
-            self->HandleFinEvent(pcb);
+            self->HandleFinEvent();
         }
         return ERR_OK;
     });
     tcp_sent(pcb_, [](void* arg, tcp_pcb* pcb, uint16_t len) -> err_t {
         auto* self = reinterpret_cast<AsyncClient*>(arg);
-        self->HandleSentEvent(pcb, len);
+        self->HandleSentEvent(len);
         return ERR_OK;
     });
     tcp_err(pcb_, [](void* arg, err_t err) {
@@ -121,7 +118,7 @@ void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
     });
     tcp_poll(pcb_, [](void* arg, tcp_pcb* pcb) -> err_t {
         auto* self = reinterpret_cast<AsyncClient*>(arg);
-        self->HandlePollEvent(pcb);
+        self->HandlePollEvent();
         return ERR_OK;
     }, 1);
 
@@ -129,7 +126,7 @@ void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
     xEventGroupClearBits(event_group_, ASYNC_TCP_SENDDING_BIT);
 }
 
-void AsyncClient::HandleReceiveEvent(tcp_pcb* pcb, pbuf* pb)
+void AsyncClient::HandleReceiveEvent(pbuf* pb)
 {
     last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
     defer_ack_ = false;
@@ -185,7 +182,7 @@ void AsyncClient::HandleReceiveEvent(tcp_pcb* pcb, pbuf* pb)
     if (ok) events_++;
 }
 
-void AsyncClient::HandleFinEvent(tcp_pcb* pcb)
+void AsyncClient::HandleFinEvent()
 {
     auto* event = new async_event_t;
     event->arg = this;
@@ -240,7 +237,7 @@ void AsyncClient::HandleErrorEvent(err_t err)
     if (ok) events_++; 
 }
 
-void AsyncClient::HandlePollEvent(tcp_pcb* pcb)
+void AsyncClient::HandlePollEvent()
 {
     auto* event = new async_event_t;
     event->arg = this;
@@ -302,7 +299,7 @@ void AsyncClient::HandleConnectEvent()
     if (ok) events_++;
 }
 
-void AsyncClient::HandleSentEvent(tcp_pcb* pcb, uint16_t len)
+void AsyncClient::HandleSentEvent(uint16_t len)
 {
     // 立即解除发送状态
     xEventGroupSetBits(event_group_, ASYNC_TCP_CAN_SEND_BIT);
@@ -345,16 +342,14 @@ bool AsyncClient::connect(ip_addr_t& addr, uint16_t port)
 
     init(nullptr, pcb_);
 
-    lwip_data_t msg = {
-        .data = {},
-        .pcb = pcb_,
-        .port = port,
-        .addr = &addr,
-        .fn = [] (void* arg, tcp_pcb* pcb, err_t err) -> err_t {
-            auto* self = reinterpret_cast<AsyncClient*>(arg);
-            self->HandleConnectEvent();
-            return ERR_OK;
-        }
+    lwip_data_t msg = {};
+    msg.pcb = pcb_;
+    msg.port = port;
+    msg.addr = &addr;
+    msg.fn = [] (void* arg, tcp_pcb* pcb, err_t err) -> err_t {
+        auto* self = reinterpret_cast<AsyncClient*>(arg);
+        self->HandleConnectEvent();
+        return ERR_OK;
     };
     auto err = tcpip_api_call([](tcpip_api_call_data * data) -> err_t {
             auto* msg = reinterpret_cast<lwip_data_t*>(data);
@@ -380,7 +375,8 @@ err_t AsyncClient::connect(const char* name, uint16_t port)
 }
 
 /// @brief 通知异步TCP可以释放连接了
-void AsyncClient::close()
+/// @param now true时立即关闭连接，false时将回收连接（）
+void AsyncClient::close(bool now)
 {
     if (IsActive()) {
         // 注销在pcb_上的相应函数
@@ -423,13 +419,11 @@ size_t AsyncClient::add(const void* data, size_t size, uint8_t apiflags)
     }
     uint16_t will_send = room > size ? size : room;
 
-    lwip_data_t msg = {
-        .data = {},
-        .pcb = pcb_,
-        .write_apiflag = apiflags,
-        .write_len = will_send,
-        .write_data = data
-    };
+    lwip_data_t msg = {};
+    msg.pcb = pcb_;
+    msg.write_apiflag = apiflags;
+    msg.write_len = will_send;
+    msg.write_data = data;
     auto err = tcpip_api_call([](tcpip_api_call_data * data) -> err_t {
             auto* msg = reinterpret_cast<lwip_data_t*>(data);
             return tcp_write(msg->pcb, msg->write_data, msg->write_len, msg->write_apiflag);

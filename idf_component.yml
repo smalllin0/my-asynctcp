@@ -1,7 +1,7 @@
 description: 异步TCP组件
 license: Apache 2.0
 repository: https://github.com/smalllin0/my-asynctcp.git
-version: 1.1.1
+version: 1.1.2
 dependencies:
   idf: '>=5.4'
   smallin/my-background: '>=1.1.0'

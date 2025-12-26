@@ -26,11 +26,10 @@ class AsyncClient {
 public:
     AsyncClient();
 
-    bool    IsActive();
     bool    IsSendding();
     bool    connect(ip_addr_t& addr, uint16_t port);
     err_t   connect(const char* name, uint16_t port);
-    void    close();
+    void    close(bool now=false);
     size_t  get_send_buffer_size();
     size_t  add(const void* data, size_t size, uint8_t apiflags=TCP_WRITE_FLAG_MORE);
     bool    send();
@@ -169,18 +168,18 @@ private:
     };
 
     void init(AsyncServer* server, tcp_pcb* pcb);
+    bool IsActive();
     void recycle();
     ~AsyncClient();
-    void HandleReceiveEvent(tcp_pcb* pcb, pbuf* pb);
-    void HandleFinEvent(tcp_pcb* pcb);
+    void HandleReceiveEvent(pbuf* pb);
+    void HandleFinEvent();
     void HandleErrorEvent(err_t err);
-    void HandlePollEvent(tcp_pcb* pcb);
+    void HandlePollEvent();
     void HandleConnectEvent();
-    void HandleSentEvent(tcp_pcb* pcb, uint16_t len);
+    void HandleSentEvent(uint16_t len);
 
 
     std::atomic<size_t> events_{0};             // 关联的事件数据是多少
-    std::atomic<bool>   closed_flag_{false};
     size_t              unack_rx_bytes_{0};     // 尚未确认字节数
     uint32_t            last_rx_timestamp_;     // 最后接收数据时间戳
     uint32_t            last_tx_timestamp_;     // 最后发送数据时间戳

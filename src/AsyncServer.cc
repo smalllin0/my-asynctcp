@@ -144,9 +144,8 @@ err_t AsyncServer::bind()
         (tcpip_api_call_data*)&msg);
 }
 
-/// @brief 申请TCP连接
-/// @param pcb 
-/// @return 
+/// @brief 向连接池申请连接
+/// @param pcb 关联的pcb
 AsyncClient* AsyncServer::allocateClient(tcp_pcb* pcb)
 {
     AsyncClient* client;
