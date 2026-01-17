@@ -25,6 +25,7 @@ using AcRecycleHandler = void (*)(void* arg);       // 回收函数
 class AsyncClient {
 public:
     AsyncClient();
+    ~AsyncClient();
 
     bool    IsSendding();
     bool    connect(ip_addr_t& addr, uint16_t port);
@@ -170,7 +171,6 @@ private:
     void init(AsyncServer* server, tcp_pcb* pcb);
     bool IsActive();
     void recycle();
-    ~AsyncClient();
     void HandleReceiveEvent(pbuf* pb);
     void HandleFinEvent();
     void HandleErrorEvent(err_t err);
