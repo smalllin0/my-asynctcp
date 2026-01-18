@@ -126,6 +126,50 @@ void AsyncClient::init(AsyncServer* server, tcp_pcb* pcb)
     xEventGroupClearBits(event_group_, ASYNC_TCP_SENDDING_BIT);
 }
 
+/// @brief 初始化客户端
+void AsyncClient::initClient()
+{
+    unack_rx_bytes_ = 0;
+    last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
+    last_tx_timestamp_ = last_rx_timestamp_;
+    ack_timeout_ms_ = CONFIG_ASYNC_MAX_ACK_TIME;
+    rx_timeout_second_ = 0;
+    nodelay_ = false;
+    defer_ack_ = false;
+
+    tcp_arg(pcb_, this);
+    tcp_recv(pcb_, [](void* arg, tcp_pcb* pcb, pbuf* pb, err_t err) ->err_t {
+        auto* self = reinterpret_cast<AsyncClient*>(arg);
+        if (pb) {
+            self->HandleReceiveEvent(pb);
+        } else {
+            self->close();
+            self->HandleFinEvent();
+        }
+        return ERR_OK;
+    });
+    tcp_sent(pcb_, [](void* arg, tcp_pcb* pcb, uint16_t len) -> err_t {
+        auto* self = reinterpret_cast<AsyncClient*>(arg);
+        self->HandleSentEvent(len);
+        return ERR_OK;
+    });
+    tcp_err(pcb_, [](void* arg, err_t err) {
+        auto* self = reinterpret_cast<AsyncClient*>(arg);
+        self->close();
+        self->pcb_ = nullptr;       // LWIP已经释放，防止二次释放
+        self->HandleErrorEvent(err);
+    });
+    tcp_poll(pcb_, [](void* arg, tcp_pcb* pcb) -> err_t {
+        auto* self = reinterpret_cast<AsyncClient*>(arg);
+        self->HandlePollEvent();
+        return ERR_OK;
+    }, 1);
+
+    xEventGroupSetBits(event_group_, ASYNC_TCP_ACTIVE_BIT | ASYNC_TCP_CAN_SEND_BIT);
+    xEventGroupClearBits(event_group_, ASYNC_TCP_SENDDING_BIT);
+}
+
+
 void AsyncClient::HandleReceiveEvent(pbuf* pb)
 {
     last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
@@ -340,7 +384,7 @@ bool AsyncClient::connect(ip_addr_t& addr, uint16_t port)
         return false;
     }
 
-    init(nullptr, pcb_);
+    initClient();
 
     lwip_data_t msg = {};
     msg.pcb = pcb_;

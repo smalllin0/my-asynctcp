@@ -169,6 +169,7 @@ private:
     };
 
     void init(AsyncServer* server, tcp_pcb* pcb);
+    void initClient();
     bool IsActive();
     void recycle();
     void HandleReceiveEvent(pbuf* pb);
@@ -187,10 +188,10 @@ private:
     uint16_t            rx_timeout_second_{0};  // 接收超时时间（秒）
     bool                nodelay_{false};
     bool                defer_ack_{false};      // 是否延迟发送ACK
-    tcp_pcb*            pcb_;                   // 关联的协议控制块
-    AsyncServer*        server_;
-    AsyncClient*        next_;
-    EventGroupHandle_t  event_group_;
+    tcp_pcb*            pcb_{nullptr};          // 关联的协议控制块
+    AsyncServer*        server_{nullptr};
+    AsyncClient*        next_{nullptr};
+    EventGroupHandle_t  event_group_{nullptr};
     MyBackground&       bg_;
 
     AcConnectHandler    on_connected_handler{nullptr};       // 连接成功回调函数
