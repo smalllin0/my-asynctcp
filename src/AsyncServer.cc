@@ -100,11 +100,13 @@ void AsyncServer::begin()
         client->set_nodelay(this_->nodelay_);
 
         if (this_->on_connected_handler_) {
-            auto ok = this_->bg_.Schedule([](void* arg) {
+            auto ok = this_->bg_.Schedule(
+                "Arrived Event",
+                [](void* arg) {
                     auto* client = reinterpret_cast<AsyncClient*>(arg);
                     auto* server = client->server_;
                     server->on_connected_handler_(server->on_connected_arg_, client);
-                },"Arrived Event", client);
+                },nullptr, client);
             if (!ok) { 
                 ESP_LOGE(TAG, "Failed to add connected fun to background.");
                 this_->recycleClient(client);

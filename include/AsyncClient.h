@@ -24,6 +24,16 @@ using AcRecycleHandler = void (*)(void* arg);       // 回收函数
 
 class AsyncClient {
 public:
+    struct SentTask;
+    struct RecvTask;
+    struct ErrTask;
+    struct PollTask;
+
+    friend struct SentTask;
+    friend struct RecvTask;
+    friend struct ErrTask;
+    friend struct PollTask;
+public:
     AsyncClient();
     ~AsyncClient();
 

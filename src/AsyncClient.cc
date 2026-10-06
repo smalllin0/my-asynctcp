@@ -18,6 +18,168 @@ struct notify_data_t {
     uint16_t                len;
 };
 
+// =============================================================
+// 后台多参数任务
+// =============================================================
+
+/// @brief 数据发送完成任务
+struct AsyncClient::SentTask : BgTask {
+    struct Data {
+        AsyncClient     *conn;
+        uint16_t         len;
+        uint32_t         time; 
+    };
+    SentTask(AsyncClient *c, uint16_t l, uint32_t t) {
+        emplace<Data>(c, l, t);
+    }
+    ~SentTask() override {
+        auto* d = get<Data>();
+        if (!d) return;
+        auto* conn = d->conn;
+
+        conn->events_ --;
+        conn->recycle();
+    }
+protected:
+    void Run() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        if (conn->on_data_sent_handler) {
+            conn->on_data_sent_handler(conn->on_data_sent_arg, d->len, d->time);
+        }
+    }
+};
+
+
+struct AsyncClient::RecvTask : BgTask {
+    struct Data {
+        AsyncClient*    conn;
+        pbuf*           pb;
+        uint16_t        len; 
+    };
+    RecvTask(AsyncClient *c, pbuf* p, uint16_t l) {
+        emplace<Data>(c, p, l);
+    }
+    ~RecvTask() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        auto* pb = d->pb;
+        auto tot_len = d->len;
+
+        if (tot_len) {
+            if (conn->defer_ack_) {
+                conn->unack_rx_bytes_ += tot_len;
+            } else {
+                if (conn->pcb_) {
+                    notify_data_t msg = {
+                        .data = nullptr,
+                        .pcb = conn->pcb_,
+                        .len = tot_len
+                    };
+                    tcpip_api_call([](tcpip_api_call_data* data) -> err_t {
+                            auto* msg = reinterpret_cast<notify_data_t*>(data);
+                            tcp_recved(msg->pcb, msg->len);
+                            return ERR_OK;
+                        },
+                        (tcpip_api_call_data*)&msg);
+                }
+            }
+        }
+        pbuf_free(pb);
+        conn->events_ --;
+        conn->recycle();
+}
+protected:
+    void Run() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        auto* pb = d->pb;
+        if (conn->on_data_received_handler != nullptr) {
+            while (pb) {
+                auto* current = pb;
+                pb = pb->next;
+                conn->on_data_received_handler(conn->on_data_received_arg, current->payload, current->len);
+            }
+        }
+    }
+};
+
+struct AsyncClient::ErrTask : BgTask {
+    struct Data {
+        AsyncClient*    conn;
+        err_t           err;
+    };
+    ErrTask(AsyncClient *c, err_t e) {
+        emplace<Data>(c, e);
+    }
+    ~ErrTask() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        conn->events_ --;
+        conn->recycle();
+    }
+protected:
+    void Run() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        if (conn->on_error_handler != nullptr) {
+            conn->on_error_handler(conn->on_error_arg, d->err);
+        }
+    }
+};
+
+struct AsyncClient::PollTask : BgTask {
+    struct Data {
+        AsyncClient*    conn;
+        uint32_t        time;
+    };
+    PollTask(AsyncClient *c, uint32_t t) {
+        emplace<Data>(c, t);
+    }
+    ~PollTask() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        conn->events_ --;
+        conn->recycle();
+    }
+protected:
+    void Run() override {
+        auto* d = get<Data>();
+        if (!d) return;
+
+        auto* conn = d->conn;
+        if (conn->IsActive()) {
+            // 逻辑存在问题
+            // if (conn->IsSendding() && SystemInfo::Timeout(conn->last_tx_timestamp_, event->poll_time, conn->ack_timeout_ms_)) {
+            //     if (conn->on_timeout_handler) {
+            //         conn->on_timeout_handler(conn->on_timeout_arg, event->poll_time - conn->last_tx_timestamp_);
+            //     } else {
+            //         conn->close();
+            //         ESP_LOGW(TAG, "ACK timeout, connection closed.");
+            //     }
+            // }
+            if (conn->rx_timeout_second_ && SystemInfo::Timeout(conn->last_rx_timestamp_, d->time, conn->rx_timeout_second_ * 1000)) {
+                conn->close();
+                ESP_LOGW(TAG, "Receive timeout, connection closed.");
+            }
+            if (conn->on_poll_handler) {
+                conn->on_poll_handler(conn->on_poll_arg);
+            }
+        }
+    }
+};
 
 AsyncClient::AsyncClient()
     : bg_(MyBackground::GetInstance())
@@ -28,16 +190,18 @@ AsyncClient::AsyncClient()
 // 回收本连接
 void AsyncClient::recycle()
 {
-    if (!IsActive() && events_.load() == 0) {
-        // 上层回收逻辑
-        if (on_recycle_handler) {
-            on_recycle_handler(on_recycle_arg);
-        }
-        // 释放pcb
+    if (IsActive() || events_.load() != 0) return;
+
+    if (on_recycle_handler) {
+        on_recycle_handler(on_recycle_arg);
+    }
+
+    if (pcb_) {                          // ← 判空
         close_tcp(pcb_);
         pcb_ = nullptr;
+    }
 
-        // 回收本层资源
+    if (server_) {                       // ← 判空
         server_->recycleClient(this);
     }
 }
@@ -174,82 +338,32 @@ void AsyncClient::HandleReceiveEvent(pbuf* pb)
 {
     last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
     defer_ack_ = false;
-    auto* event = new async_event_t;
-    event->arg = this;
-    event->buf = pb;
-    event->tot_len = pb->tot_len;
-    auto ok = bg_.Schedule(
-        [](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            auto* pb = event->buf;
-            if (self->on_data_received_handler != nullptr) {
-                while (pb) {
-                    auto* current = pb;
-                    pb = pb->next;
-                    self->on_data_received_handler(self->on_data_received_arg, current->payload, current->len);
-                }
-            }
-        },
-        "Rece Event",
-        event,
-        [](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            auto* pb = event->buf;
-            auto tot_len = event->tot_len;
-            if (tot_len) {
-                if (self->defer_ack_) {
-                    self->unack_rx_bytes_ += tot_len;
-                } else {
-                    if (self->pcb_) {
-                        notify_data_t msg = {
-                            .data = nullptr,
-                            .pcb = self->pcb_,
-                            .len = tot_len
-                        };
-                        tcpip_api_call([](tcpip_api_call_data* data) -> err_t {
-                                auto* msg = reinterpret_cast<notify_data_t*>(data);
-                                tcp_recved(msg->pcb, msg->len);
-                                return ERR_OK;
-                            },
-                            (tcpip_api_call_data*)&msg);
-                    }
-                }
-            }
-            pbuf_free(pb);
-            self->events_ --;
-            delete event;
-            self->recycle();
-        }
-    );
-    if (ok) events_++;
+
+    events_++;
+    auto ok = bg_.Schedule<RecvTask>("RecvTask", this, pb, pb->tot_len);
+    if (!ok) events_--;
 }
 
 void AsyncClient::HandleFinEvent()
 {
-    auto* event = new async_event_t;
-    event->arg = this;
-    auto ok =bg_.Schedule(
+    events_++;
+    auto ok = bg_.Schedule(
+        "TcpFin",
         [](void* arg){
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
+            auto* self = reinterpret_cast<AsyncClient*>(arg);
             if (self->on_disconnected_handler) {
                 self->on_disconnected_handler(self->on_disconnected_arg);
-            }
+            }           
         },
-        "Fin Event",
-        event,
-        [](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            xEventGroupClearBits(self->event_group_, ASYNC_TCP_ACTIVE_BIT);
-            self->events_--;
-            delete event;
-            self->recycle();
-        }
-    ); 
-    if (ok) events_++;
+        [](void* ctx, bool) {
+            auto* conn = reinterpret_cast<AsyncClient*>(ctx);
+            xEventGroupClearBits(conn->event_group_, ASYNC_TCP_ACTIVE_BIT);
+            conn->events_--;
+            conn->recycle();
+        },
+        this
+    );
+    if (!ok) events_--;
 }
 
 void AsyncClient::HandleErrorEvent(err_t err)
@@ -257,118 +371,53 @@ void AsyncClient::HandleErrorEvent(err_t err)
     // 处理错误
     xEventGroupClearBits(event_group_, ASYNC_TCP_ACTIVE_BIT | ASYNC_TCP_CAN_SEND_BIT);
 
-    auto* event = new async_event_t;
-    event->arg = this;
-    event->err = err;
-    auto ok = bg_.Schedule(
-        [](void* arg){
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            if (self->on_error_handler) {
-                self->on_error_handler(self->on_error_arg, event->err);
-            }
-        },
-        "Error Event",
-        event,
-        [](void* arg){
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            self->events_--;
-            delete event;
-            self->recycle();
-        }
-    );   
-    if (ok) events_++; 
+    events_++;
+    auto ok = bg_.Schedule<ErrTask>("TcpError", this, err);
+    if (!ok) events_--;
 }
 
 void AsyncClient::HandlePollEvent()
 {
-    auto* event = new async_event_t;
-    event->arg = this;
-    event->poll_time = SystemInfo::GetMsSinceStart();
-    auto ok = bg_.Schedule(
-        [](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            if (self->IsActive()) {
-                // 逻辑存在问题
-                // if (self->IsSendding() && SystemInfo::Timeout(self->last_tx_timestamp_, event->poll_time, self->ack_timeout_ms_)) {
-                //     if (self->on_timeout_handler) {
-                //         self->on_timeout_handler(self->on_timeout_arg, event->poll_time - self->last_tx_timestamp_);
-                //     } else {
-                //         self->close();
-                //         ESP_LOGW(TAG, "ACK timeout, connection closed.");
-                //     }
-                // }
-                if (self->rx_timeout_second_ && SystemInfo::Timeout(self->last_rx_timestamp_, event->poll_time, self->rx_timeout_second_ * 1000)) {
-                    self->close();
-                    ESP_LOGW(TAG, "Receive timeout, connection closed.");
-                }
-                if (self->on_poll_handler) {
-                    self->on_poll_handler(self->on_poll_arg);
-                }
-            }
-        },
-        "Poll Event",
-        event,
-        [](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            self->events_--;
-            delete event;
-            self->recycle();
-        }
-    );
-    if (ok) events_++;
+    events_++;
+    auto ok = bg_.Schedule<PollTask>("TcpPoll", this, SystemInfo::GetMsSinceStart());
+    if (!ok) events_--;
 }
 
 void AsyncClient::HandleConnectEvent()
 {
     last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
-    auto ok = bg_.Schedule([](void* arg) {
-            auto* self = reinterpret_cast<AsyncClient*>(arg);
+    events_++;
+    auto ok = bg_.Schedule(
+        "Connected",
+        [](void* ctx) {
+            auto* self = reinterpret_cast<AsyncClient*>(ctx);
             self->last_rx_timestamp_ = SystemInfo::GetMsSinceStart();
             if (self->on_connected_handler) {
                 self->on_connected_handler(self->on_connected_arg, self);
             }
         },
-        "Connoect Event",
-        this,
-        [](void* arg){
-            auto* self = reinterpret_cast<AsyncClient*>(arg);
+        [](void* ctx, bool was_run) {
+            auto* self = reinterpret_cast<AsyncClient*>(ctx);
             xEventGroupSetBits(self->event_group_, ASYNC_TCP_ACTIVE_BIT);
             self->events_--;
             self->recycle();
-        });
-    if (ok) events_++;
+        },
+        this
+    );
+    if (!ok) events_--;
+
 }
 
+struct SentTask;
 void AsyncClient::HandleSentEvent(uint16_t len)
 {
     // 立即解除发送状态
     xEventGroupSetBits(event_group_, ASYNC_TCP_CAN_SEND_BIT);
     xEventGroupClearBits(event_group_, ASYNC_TCP_SENDDING_BIT);
-    auto* event = new async_event_t;
-    event->arg = this;
-    event->time = SystemInfo::GetMsSinceStart() - last_tx_timestamp_;
-    event->len = len;
-    auto ok = bg_.Schedule([](void* arg) {
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            if (self->on_data_sent_handler) {
-                self->on_data_sent_handler(self->on_data_sent_arg, event->len, event->time);
-            }
-        },
-        "Sent Event",
-        event,
-        [](void* arg){
-            auto* event = reinterpret_cast<async_event_t*>(arg);
-            auto* self = reinterpret_cast<AsyncClient*>(event->arg);
-            self->events_--;
-            delete event;
-            self->recycle();
-        });
-    if (ok) events_++;
+    events_++;
+    auto ok = bg_.Schedule<SentTask>("TcpSent", this, len, 
+        SystemInfo::GetMsSinceStart() - last_tx_timestamp_);
+    if (!ok) events_--;
 }
 
 bool AsyncClient::connect(ip_addr_t& addr, uint16_t port)
@@ -424,14 +473,20 @@ void AsyncClient::close(bool now)
 {
     if (IsActive()) {
         // 注销在pcb_上的相应函数
-        tcp_arg(pcb_, nullptr);
+        // tcp_arg(pcb_, nullptr);
         tcp_recv(pcb_, nullptr);
         tcp_sent(pcb_, nullptr);
-        tcp_err(pcb_, nullptr);
+        // tcp_err(pcb_, nullptr);
         tcp_poll(pcb_, nullptr, 0);
 
         // 清除活跃性标志，准备进行关闭
         xEventGroupClearBits(event_group_, ASYNC_TCP_ACTIVE_BIT); 
+
+        // now=true 时立即让 lwip 接管 pcb 生命周期
+        if (now && pcb_) {
+            close_tcp(pcb_);                 // 异步关闭
+            // 不清 pcb_，等 tcp_err 回调来清
+        }
     }
 }
 
@@ -515,3 +570,5 @@ size_t AsyncClient::write(const void* data, uint16_t size, uint8_t apiflags)
     }
     return will_send;
 }
+
+
