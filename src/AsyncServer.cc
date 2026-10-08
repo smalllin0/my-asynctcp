@@ -25,8 +25,8 @@ AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
 void AsyncServer::Clean(bool clean_all)
 {
     // 调用上层清理回调清理上层资源
-    if (on_clean_handler_) {
-        on_clean_handler_(on_clean_arg_);
+    if (on_cleanup_) {
+        on_cleanup_(on_cleanup_arg_);
     }
 
     // 清理本层资源
@@ -40,7 +40,7 @@ void AsyncServer::Clean(bool clean_all)
         }
         head->next_ = nullptr;
         if (!clean_all) {
-            recycleClient(head);
+            RecycleClient(head);
             ESP_LOGI(TAG, "连接已被清理.");
         } else {
             delete head;
@@ -50,7 +50,7 @@ void AsyncServer::Clean(bool clean_all)
 }
 
 /// @brief 启动TCP服务器
-void AsyncServer::begin()
+void AsyncServer::Begin()
 {
     if (pcb_) {
         ESP_LOGE(TAG, "启动错误：协议控制块PCB不为空");
@@ -63,7 +63,7 @@ void AsyncServer::begin()
         return;
     }
 
-    if (bind() != ERR_OK) {
+    if (Bind() != ERR_OK) {
         abort_tcp(pcb_);           
         pcb_ = nullptr;            
         ESP_LOGE(TAG, "启动失败：PCB绑定IP、Port时出错");
@@ -71,7 +71,7 @@ void AsyncServer::begin()
     }
 
     
-    recycleClient(new AsyncClient());
+    RecycleClient(new AsyncConnection());
 
 
 
@@ -96,20 +96,20 @@ void AsyncServer::begin()
             return ERR_ABRT;
         }
         auto* this_ = reinterpret_cast<AsyncServer*>(arg);
-        auto* client = this_->allocateClient(pcb);
-        client->set_nodelay(this_->nodelay_);
+        auto* client = this_->AllocateClient(pcb);
+        client->SetNoDelay(this_->nodelay_);
 
-        if (this_->on_connected_handler_) {
+        if (this_->on_accept_) {
             auto ok = this_->bg_.Schedule(
                 "Arrived Event",
                 [](void* arg) {
-                    auto* client = reinterpret_cast<AsyncClient*>(arg);
+                    auto* client = reinterpret_cast<AsyncConnection*>(arg);
                     auto* server = client->server_;
-                    server->on_connected_handler_(server->on_connected_arg_, client);
+                    server->on_accept_(server->on_accept_arg_, client);
                 },nullptr, client);
             if (!ok) { 
                 ESP_LOGE(TAG, "Failed to add connected fun to background.");
-                this_->recycleClient(client);
+                this_->RecycleClient(client);
                 return ESP_FAIL;
             }
         }
@@ -118,7 +118,7 @@ void AsyncServer::begin()
 }
 
 /// @brief 关闭服务器连
-void AsyncServer::end()
+void AsyncServer::End()
 {
     if (pcb_) {
         tcp_accept(pcb_, nullptr);
@@ -131,7 +131,7 @@ void AsyncServer::end()
 }
 
 /// 将IP/Port关联至PCB
-err_t AsyncServer::bind()
+err_t AsyncServer::Bind()
 {
     tcpip_bind_data_t msg = {
         .data = nullptr,
@@ -148,21 +148,21 @@ err_t AsyncServer::bind()
 
 /// @brief 向连接池申请连接
 /// @param pcb 关联的pcb
-AsyncClient* AsyncServer::allocateClient(tcp_pcb* pcb)
+AsyncConnection* AsyncServer::AllocateClient(tcp_pcb* pcb)
 {
-    AsyncClient* client;
-    AsyncClient* expected;
+    AsyncConnection* client;
+    AsyncConnection* expected;
 
     do {
         expected = pool_.load();
         if (!expected) {
-            client = new AsyncClient();
+            client = new AsyncConnection();
             break;
         }
         client = expected;
     } while (! pool_.compare_exchange_weak(expected, client->next_));
 
     xTimerReset(recycleTimer_, 0);
-    client->init(this, pcb);
+    client->Init(this, pcb);
     return client;
 }

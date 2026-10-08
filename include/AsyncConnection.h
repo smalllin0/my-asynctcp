@@ -8,21 +8,21 @@
 #include <atomic>
 
 class AsyncServer;
-class AsyncClient;
+class AsyncConnection;
 
 
-using AcAckHandler = void (*)(void* arg, size_t len, uint32_t time);
+using SentCb = void (*)(void* arg, size_t len, uint32_t time);
 using AcPacketHandler = void (*)(void* arg, pbuf* pb);
-using AcDataHandler = void (*)(void* arg, void* data, size_t len);
-using AcPollHandler = void (*)(void* arg);
-using AcConnectHandler = void (*)(void* arg, AsyncClient* c);
-using AcDisConnectHandler = void (*)(void* arg);
-using AcErrorHandler = void (*)(void* arg, err_t error);
-using AcTimeoutHandler = void (*)(void* arg, uint32_t time);
-using AcRecycleHandler = void (*)(void* arg);       // 回收函数
+using DataCb = void (*)(void* arg, void* data, size_t len);
+using PollCb = void (*)(void* arg);
+using ConnectCb = void (*)(void* arg, AsyncConnection* c);
+using DisconnectCb = void (*)(void* arg);
+using ErrorCb = void (*)(void* arg, err_t error);
+using TimeoutCb = void (*)(void* arg, uint32_t time);
+using RecycleCb = void (*)(void* arg);       // 回收函数
 
 
-class AsyncClient {
+class AsyncConnection {
 public:
     struct SentTask;
     struct RecvTask;
@@ -34,8 +34,8 @@ public:
     friend struct ErrTask;
     friend struct PollTask;
 public:
-    AsyncClient();
-    ~AsyncClient();
+    AsyncConnection();
+    ~AsyncConnection();
 
     bool    IsSendding();
     bool    connect(ip_addr_t& addr, uint16_t port);
@@ -49,30 +49,30 @@ public:
 
 
     /// @brief 获取连接状态
-    tcp_state   get_connection_state() {
+    tcp_state   GetConnectionState() {
         return IsActive() ? pcb_->state : CLOSED;
     }
     /// @brief 获取当前连接最大报文段长度（Maximum Segment Size）
-    uint16_t    get_MSS() {
+    uint16_t    GetMSS() {
         return IsActive() ? tcp_mss(pcb_) : 0;
     }
-    uint16_t    get_rx_timeout() {
+    uint16_t    GetRxTimeout() {
         return rx_timeout_second_;
     }
-    void        set_rx_timeout_second(uint16_t timeout) {
-        rx_timeout_second_ = timeout;
+    void        SetRxTimeout(uint16_t second) {
+        rx_timeout_second_ = second;
     }
-    uint32_t    get_ack_timeout() {
+    uint32_t    GetAckTimeout() {
         return ack_timeout_ms_;
     }
-    void        set_ack_timeout_ms(uint32_t timeout) {
-        ack_timeout_ms_ = timeout;
+    void        SetAckTimeout(uint32_t ms) {
+        ack_timeout_ms_ = ms;
     }
     /// @brief 获取低延时功能启用状态
-    bool        get_nodelay_state() {
+    bool        GetNoDalayState() {
         return IsActive() ? nodelay_ : false;
     }
-    void        set_nodelay(bool nodelay) {
+    void        SetNoDelay(bool nodelay) {
         if (IsActive()) {
             nodelay_ = nodelay;
             if (nodelay) {
@@ -82,64 +82,64 @@ public:
             }
         }
     }
-    ip_addr_t   get_remote_IP() {
+    ip_addr_t   GetRemouteIp() {
         return pcb_ ? pcb_->remote_ip : (ip_addr_t)IPADDR4_INIT(0);
     }
-    ip_addr_t   get_local_IP() {
+    ip_addr_t   GetLocalIp() {
         return pcb_ ? pcb_->local_ip : (ip_addr_t)IPADDR4_INIT(0);
     }
-    uint16_t    get_remote_port() {
+    uint16_t    GetRemotePort() {
         return pcb_ ? pcb_->remote_port : 0;
     }
-    uint16_t    get_local_port() {
+    uint16_t    GetLocalPort() {
         return pcb_ ? pcb_->local_port : 0;
     }
     /// @brief 设置是否延迟ACK确认
-    void set_defer_ack(bool defer) {
+    void SetDeferAck(bool defer) {
         defer_ack_ = defer;
     }
 
 
     /// @brief 业务型回调，设置连接成功回调函数
-    void set_connected_event_handler(AcConnectHandler cb, void* arg = nullptr) {
-        on_connected_handler = cb;
-        on_connected_arg = arg;
+    void set_connected_event_handler(ConnectCb cb, void* arg = nullptr) {
+        on_connect_ = cb;
+        on_connect_arg_ = arg;
     }
     /// @brief 业务型回调，设置断开连接后回调函数
-    void    set_disconnected_event_handler(AcDisConnectHandler cb, void* arg = nullptr) {
-        on_disconnected_handler = cb;
-        on_disconnected_arg = arg;
+    void    set_disconnected_event_handler(DisconnectCb cb, void* arg = nullptr) {
+        on_disconnect_ = cb;
+        on_disconnect_arg_ = arg;
     }
     /// @brief 业务型回调，设置数据发送完成回调函数
-    void    set_ack_event_handler(AcAckHandler cb, void* arg = nullptr) {
-        on_data_sent_handler = cb;
-        on_data_sent_arg = arg;
+    void    set_ack_event_handler(SentCb cb, void* arg = nullptr) {
+        on_sent_ = cb;
+        on_sent_arg_ = arg;
     }
     /// @brief 业务型回调，设置连接异常回调函数
-    void    set_error_event_handler(AcErrorHandler cb, void* arg = nullptr) {
-        on_error_handler = cb;
-        on_error_arg = arg;
+    void    set_error_event_handler(ErrorCb cb, void* arg = nullptr) {
+        on_error_ = cb;
+        on_error_arg_ = arg;
     }
     /// @brief 业务型回调，设置接收到数据包后的回调函数（不需要释放数据包，存在拷贝时延迟）
-    void    set_data_received_handler(AcDataHandler cb, void* arg = nullptr) {
-        on_data_received_handler = cb;
-        on_data_received_arg = arg;
+    void    set_data_received_handler(DataCb cb, void* arg = nullptr) {
+        on_data_ = cb;
+        on_data_arg_ = arg;
     }
     /// @brief 业务型回调，设置发送超时回调函数（默认关闭连接）
-    void    set_timeout_event_handler(AcTimeoutHandler cb, void* arg = nullptr) {
-        on_timeout_handler = cb;
-        on_timeout_arg = arg;
+    void    set_timeout_event_handler(TimeoutCb cb, void* arg = nullptr) {
+        on_timeout_ = cb;
+        on_timeout_arg_ = arg;
     }
     /// @brief 业务型回调，设置定期轮询回调函数
-    void    set_poll_event_handler(AcPollHandler cb, void* arg = nullptr) {
-        on_poll_handler = cb;
-        on_poll_arg = arg;
+    void    set_poll_event_handler(PollCb cb, void* arg = nullptr) {
+        on_poll_ = cb;
+        on_poll_arg_ = arg;
     }
 
     /// @brief 资源型回调，设置回收时的回调函数（上层对象析构时所有的资源回收都应在这里完成）
-    void    set_recycle_handler(AcRecycleHandler cb, void* arg) {
-        on_recycle_handler = cb;
-        on_recycle_arg = arg;
+    void    set_recycle_handler(RecycleCb cb, void* arg) {
+        on_recycle_ = cb;
+        on_recycle_arg_ = arg;
     }
 
 private:
@@ -178,10 +178,10 @@ private:
       };
     };
 
-    void init(AsyncServer* server, tcp_pcb* pcb);
-    void initClient();
+    void Init(AsyncServer* server, tcp_pcb* pcb);
+    void InitClient();
     bool IsActive();
-    void recycle();
+    void Recycle();
     void HandleReceiveEvent(pbuf* pb);
     void HandleFinEvent();
     void HandleErrorEvent(err_t err);
@@ -192,35 +192,27 @@ private:
 
     std::atomic<size_t> events_{0};             // 关联的事件数据是多少
     size_t              unack_rx_bytes_{0};     // 尚未确认字节数
-    uint32_t            last_rx_timestamp_;     // 最后接收数据时间戳
-    uint32_t            last_tx_timestamp_;     // 最后发送数据时间戳
+    uint32_t            last_rx_ms_;            // 最后接收数据时间戳
+    uint32_t            last_tx_ms_;            // 最后发送数据时间戳
     uint32_t            ack_timeout_ms_;        // ACK超时时间（毫秒）
     uint16_t            rx_timeout_second_{0};  // 接收超时时间（秒）
     bool                nodelay_{false};
     bool                defer_ack_{false};      // 是否延迟发送ACK
     tcp_pcb*            pcb_{nullptr};          // 关联的协议控制块
     AsyncServer*        server_{nullptr};
-    AsyncClient*        next_{nullptr};
+    AsyncConnection*        next_{nullptr};
     EventGroupHandle_t  event_group_{nullptr};
     MyBackground&       bg_;
 
-    AcConnectHandler    on_connected_handler{nullptr};       // 连接成功回调函数
-    void*               on_connected_arg{nullptr};           // 连接成功时传递给回调的参数
-    AcDisConnectHandler on_disconnected_handler{nullptr};    // 连接断开回调函数
-    void*               on_disconnected_arg{nullptr};        //
-    AcAckHandler        on_data_sent_handler{nullptr};       // 数据发送完成回调函数
-    void*               on_data_sent_arg{nullptr};           //
-    AcErrorHandler      on_error_handler{nullptr};           // 错误事件回调
-    void*               on_error_arg{nullptr};               //
-    AcDataHandler       on_data_received_handler{nullptr};   // 数据接收回调
-    void*               on_data_received_arg{nullptr};       //
-    AcTimeoutHandler    on_timeout_handler{nullptr};         // 超时事件回调
-    void*               on_timeout_arg{nullptr};             //
-    AcPollHandler       on_poll_handler{nullptr};            // 轮询事件回调
-    void*               on_poll_arg{nullptr};                //
-    
-    AcRecycleHandler    on_recycle_handler;
-    void*               on_recycle_arg;     
+    ConnectCb       on_connect_{nullptr};       void* on_connect_arg_{nullptr};     // 连接成功回调函数
+    DisconnectCb    on_disconnect_{nullptr};    void* on_disconnect_arg_{nullptr};  // 连接断开回调函数
+    SentCb          on_sent_{nullptr};          void* on_sent_arg_{nullptr};        // 数据发送完成回调函数
+    ErrorCb         on_error_{nullptr};         void* on_error_arg_{nullptr};       // 错误事件回调
+    DataCb          on_data_{nullptr};          void* on_data_arg_{nullptr};        // 数据接收回调
+    TimeoutCb       on_timeout_{nullptr};       void* on_timeout_arg_{nullptr};     // 超时事件回调
+    PollCb          on_poll_{nullptr};          void* on_poll_arg_{nullptr};        // 轮询事件回调
+    RecycleCb       on_recycle_{nullptr};       void* on_recycle_arg_{nullptr};     // 回收事件回调
+        
 };
 
 
