@@ -2,7 +2,7 @@
 #include "AsyncServer.h"
 #include "my_sysInfo.h"
 #include "esp_log.h"
-#include "async.h"
+#include "LwipWrapper.h"
 #include "lwip/dns.h"
 #include "my_sysInfo.h"
 
@@ -197,7 +197,7 @@ void AsyncConnection::Recycle()
     }
 
     if (pcb_) {                          // ← 判空
-        close_tcp(pcb_);
+        LwipClose(pcb_);
         pcb_ = nullptr;
     }
 
@@ -484,14 +484,14 @@ void AsyncConnection::close(bool now)
 
         // now=true 时立即让 lwip 接管 pcb 生命周期
         if (now && pcb_) {
-            close_tcp(pcb_);                 // 异步关闭
+            LwipClose(pcb_);                 // 异步关闭
             // 不清 pcb_，等 tcp_err 回调来清
         }
     }
 }
 
 /// @brief 获取发送缓冲区大小
-size_t AsyncConnection::get_send_buffer_size()
+size_t AsyncConnection::SendBufferSize()
 {
     if (IsActive() && pcb_->state == ESTABLISHED) {
         return tcp_sndbuf(pcb_);
@@ -512,7 +512,7 @@ size_t AsyncConnection::add(const void* data, size_t size, uint8_t apiflags)
     if (!IsActive() || size == 0 || data == nullptr) {
         return 0;
     }
-    uint16_t room = get_send_buffer_size();
+    uint16_t room = SendBufferSize();
     if (!room) {
         return 0;
     }

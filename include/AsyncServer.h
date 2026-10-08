@@ -7,7 +7,7 @@
 #include "my_background.h"
 #include "lwip/priv/tcpip_priv.h"
 #include "AsyncConnection.h"
-#include "../src/async.h"
+#include "LwipWrapper.h"
 
 
 using AcCleanHandler = void (*)(void* arg);       // 清理函数
@@ -59,20 +59,9 @@ public:
     }
 
 private:
-    struct tcpip_listen_data_t {
-        tcpip_api_call_data*    data;
-        tcp_pcb*                pcb;
-        uint8_t                 listen_backlog;
-    };
-    struct tcpip_bind_data_t {
-        tcpip_api_call_data*    data;
-        tcp_pcb*                pcb;
-        ip_addr_t*              addr;
-        uint16_t                port;
-    };
 
     void Clean(bool clean_all=false);
-    err_t Bind();
+    static err_t AcceptCb(void* ctx, tcp_pcb* pcb, err_t err);
 
     bool                        nodelay_{false};
     uint16_t                    port_;
@@ -82,8 +71,8 @@ private:
     TimerHandle_t               recycleTimer_{nullptr};
     MyBackground&	            bg_;
 
-    ConnectCb    on_accept_{nullptr};        void*   on_accept_arg_{nullptr};
-    AcCleanHandler      on_cleanup_{nullptr};       void*   on_cleanup_arg_{nullptr};
+    ConnectCb       on_accept_{nullptr};    void* on_accept_arg_{nullptr};
+    AcCleanHandler  on_cleanup_{nullptr};   void* on_cleanup_arg_{nullptr};
 };
 
 #endif

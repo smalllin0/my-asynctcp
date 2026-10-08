@@ -1,10 +1,10 @@
-#ifndef ASYNCCLIENT_H_
-#define ASYNCCLIENT_H_
+#ifndef MY_ASYNC_CONNECTION_H_
+#define MY_ASYNC_CONNECTION_H_
 
 #include "lwip/tcp.h"
 #include "lwip/priv/tcpip_priv.h"
 #include "my_background.h"
-#include "../src/async.h"
+#include "LwipWrapper.h"
 #include <atomic>
 
 class AsyncServer;
@@ -41,7 +41,7 @@ public:
     bool    connect(ip_addr_t& addr, uint16_t port);
     err_t   connect(const char* name, uint16_t port);
     void    close(bool now=false);
-    size_t  get_send_buffer_size();
+    size_t  SendBufferSize();
     size_t  add(const void* data, size_t size, uint8_t apiflags=TCP_WRITE_FLAG_MORE);
     bool    send();
     size_t  write(const void* data, uint16_t size, uint8_t apiflags=TCP_WRITE_FLAG_COPY);
