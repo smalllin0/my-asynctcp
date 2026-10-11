@@ -69,7 +69,6 @@ private:
     tcp_pcb*                    pcb_{nullptr};
     std::atomic<AsyncConnection*>   pool_{nullptr};
     TimerHandle_t               recycleTimer_{nullptr};
-    MyBackground&	            bg_;
 
     ConnectCb       on_accept_{nullptr};    void* on_accept_arg_{nullptr};
     AcCleanHandler  on_cleanup_{nullptr};   void* on_cleanup_arg_{nullptr};
