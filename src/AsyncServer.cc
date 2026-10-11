@@ -58,35 +58,18 @@ void AsyncServer::Begin()
         ESP_LOGE(TAG, "启动错误： 服务已经启动");
         return;
     }
-    pcb_ = LwipServerBegin(&addr_, port_, CONFIG_SERVER_BACKLOG_LEN,
-                this, &AsyncServer::AcceptCb);
+    
+    pcb_ = LwipServerBegin(
+        &addr_, 
+        port_, 
+        CONFIG_SERVER_BACKLOG_LEN,
+        this, 
+    &AsyncServer::AcceptCb);
+
     if (!pcb_) {
         ESP_LOGE(TAG, "服务启动失败");
         return;
-    }    
-    // pcb_ = tcp_new_ip_type(IPADDR_TYPE_V4);
-    // if (!pcb_) {
-    //     ESP_LOGE(TAG, "启动失败： 创建控制块PCB失败");
-    //     return;
-    // }
-
-    // if (LwipBind(pcb_, &addr_, port_) != ERR_OK) {
-    //     LwipAbort(pcb_);           
-    //     pcb_ = nullptr;            
-    //     ESP_LOGE(TAG, "启动失败： PCB绑定IP、Port时出错");
-    //     return;
-    // }
-
-    // RecycleClient(new AsyncConnection());
-
-    // pcb_ = LwipListen(pcb_, CONFIG_SERVER_BACKLOG_LEN);
-    // if (!pcb_) {
-    //     ESP_LOGE(TAG, "启动失败： 监听失败");
-    //     return ;
-    // }
-    
-    // LwipAccept(pcb_, &AsyncServer::AcceptCb, this);
-    
+    }        
 }
 
 /// @brief 关闭服务器连
