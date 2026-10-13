@@ -6,12 +6,11 @@
 enum class ConnectionState : uint8_t {
     // 构造 / 初始化
     k_Idle,               // 对象创建，无 PCB，未 Init
-    k_Initialized,        // PCB 已分配，回调已挂，角色未定
+    k_Initialized,        // PCB 已分配，回调已挂
 
     // 连接建立
     k_DnsResolving,       // 【客户端】DNS 解析中
     k_TcpConnecting,      // 【客户端】SYN 已发，等 SYN-ACK
-    k_TcpAccepting,       // 【服务端】Accept 回调已触发，正在分配连接
     k_TlsHandshaking,     // TLS 握手中
 
     // 可用
@@ -36,7 +35,6 @@ inline const char* ToString(ConnectionState state) noexcept {
         case ConnectionState::k_Initialized: return "Initialized";
         case ConnectionState::k_DnsResolving: return "DnsResolving";
         case ConnectionState::k_TcpConnecting: return "TcpConnecting";
-        case ConnectionState::k_TcpAccepting: return "TcpAccepting";
         case ConnectionState::k_TlsHandshaking: return "TlsHandshaking";
         case ConnectionState::k_Established: return "Established";
         case ConnectionState::k_HalfClosedRemote: return "HalfClosedRemote";
