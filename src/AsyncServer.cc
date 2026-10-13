@@ -2,49 +2,21 @@
 #include "esp_log.h"
 #include "lwip/tcp.h"
 #include "LwipWrapper.h"
+#include "ConnectionPool.h"
 
 #define TAG "AsyncServer"
 
 AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
-    : port_(port)
-    , addr_(addr)
-{
-    recycleTimer_ = xTimerCreate(
-        "TCP Clean Timer",
-        pdMS_TO_TICKS(1000 * 30),       // 30s清理1次
-        pdFALSE,
-        (void*) this,
-        [](TimerHandle_t xTimer) {
-            auto* self = reinterpret_cast<AsyncServer*>(pvTimerGetTimerID(xTimer));
-            self->Clean();
-        }
-    );
-}
+    : port_(port) , addr_(addr)
+{}
 
+/// @brief 清理资源
+/// @param clean_all 
 void AsyncServer::Clean(bool clean_all)
 {
     // 调用上层清理回调清理上层资源
     if (on_cleanup_) {
         on_cleanup_(on_cleanup_arg_);
-    }
-
-    // 清理本层资源
-    auto* head = pool_.exchange(nullptr);
-    if (head != nullptr) {
-        auto* current = head->next_;
-        while (current) {
-            auto* next = current->next_;
-            delete current;
-            current = next;
-        }
-        head->next_ = nullptr;
-        if (!clean_all) {
-            RecycleClient(head);
-            ESP_LOGI(TAG, "连接已被清理.");
-        } else {
-            delete head;
-            ESP_LOGI(TAG, "连接已被清理完毕.");
-        }
     }
 }
 
@@ -55,61 +27,119 @@ void AsyncServer::Begin()
 {
 
     if (pcb_) {
-        ESP_LOGE(TAG, "启动错误： 服务已经启动");
+        ESP_LOGE(TAG, "服务启动：[ 失败 ] 服务已在运行");
         return;
     }
-    
-    pcb_ = LwipServerBegin(
-        &addr_, 
-        port_, 
-        CONFIG_SERVER_BACKLOG_LEN,
-        this, 
-    &AsyncServer::AcceptCb);
-
-    if (!pcb_) {
-        ESP_LOGE(TAG, "服务启动失败");
+    if (!on_accept_) {
+        ESP_LOGE(TAG, "服务启动：[ 失败 ] 处理回调未设置");
         return;
-    }        
+    }
+
+    struct BeginMsg {
+        AsyncServer* server;
+        err_t        err;
+    };
+
+    BeginMsg msg = {this, ERR_OK};
+
+    auto err = LwipApiCall(&msg, [](void* ctx) {
+        auto* msg = reinterpret_cast<BeginMsg*>(ctx);
+        auto* server = msg->server;
+        auto& err = msg->err;
+        
+        auto* pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+        if (!pcb) {
+            err = ERR_MEM;
+            return;
+        }
+
+        // 绑定地址、端口
+        err = tcp_bind(pcb, &(server->addr_), server->port_);
+        if (err != ERR_OK) {
+            tcp_abort(pcb);
+            return;
+        }
+
+        // 监听连接
+        auto* listen_pcb = tcp_listen_with_backlog(pcb, CONFIG_SERVER_BACKLOG_LEN);
+        if (!listen_pcb) {
+            tcp_abort(pcb);
+            err = ERR_MEM;
+            return;
+        }
+
+        // 设置回调函数
+        tcp_arg(listen_pcb, server);
+        tcp_accept(listen_pcb,  &AsyncServer::AcceptCb);
+    });
+    
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "服务启动：[ 失败 ]");
+    } else {
+        ESP_LOGI(TAG, "服务启动: [ 成功 ]");
+    }      
 }
 
 /// @brief 关闭服务器连
 void AsyncServer::End()
 {
-    if (pcb_) {
-        tcp_accept(pcb_, nullptr);
-        tcp_arg(pcb_, nullptr);
-        if (LwipClose(pcb_) != ESP_OK) {
-            LwipAbort(pcb_);
+    if (!pcb_) return;
+
+    LwipApiCall(this, [](void* ctx){
+        auto* server = reinterpret_cast<AsyncServer*>(ctx);
+        auto* pcb = server->pcb_;
+
+        tcp_accept(pcb, nullptr);
+        tcp_arg(pcb, nullptr);
+        auto err = tcp_close(pcb);
+        if (err != ERR_OK) {
+            tcp_abort(pcb);
         }
-        pcb_ = nullptr;
+
+        server->pcb_ = nullptr;
+    });
+}
+
+/// @brief 连接建立时任务
+struct AsyncServer::AcceptTask : BgTask {
+    struct Data {
+        AsyncServer*        server;
+        AsyncConnection*    conn;
+    };
+    AcceptTask(AsyncServer* s, AsyncConnection* c) {
+        emplace<Data>(s, c);
     }
-}
+    ~AcceptTask() override {
+        auto* d = get<Data>();
+        if (!d) return;
 
-/// @brief 向连接池申请连接
-/// @param pcb 关联的pcb
-AsyncConnection* AsyncServer::AllocateClient(tcp_pcb* pcb)
-{
-    AsyncConnection* conn;
-    AsyncConnection* expected;
-
-    do {
-        expected = pool_.load();
-        if (!expected) {
-            conn = new AsyncConnection();
-            break;
+        if (!executed) {
+            LwipApiCall(d, [](void* ctx){
+                auto* conn = reinterpret_cast<Data*>(ctx)->conn;
+                auto err = tcp_close(conn->pcb_);
+                if (err != ERR_OK) {
+                    tcp_abort(conn->pcb_);
+                }
+                conn->pcb_ = nullptr;
+                conn->TransitionTo(ConnectionState::k_Closed);
+                ConnectionPool::GetInstance().Release(conn);
+            });
         }
-        conn = expected;
-    } while (! pool_.compare_exchange_weak(expected, conn->next_));
-
-    xTimerReset(recycleTimer_, 0);
-    conn->Init(this, pcb);
-    return conn;
-}
+    }
+    protected:
+    void Run() override {
+        auto* d = get<Data>();
+        if (!d) return;
+        
+        auto* server = d->server;
+        auto* conn = d->conn;
+        server->on_accept_(server->on_accept_arg_, conn);
+    }
+};
 
 /// @brief 连接建立时回调函数（在Lwip中运行）
 /// @param ctx 连接上下文(由Lwip 通过 tcp_arg传递)
-/// @param pcb 
-/// @param err 
 err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
 {
     auto* server = reinterpret_cast<AsyncServer*>(ctx);
@@ -118,35 +148,25 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
         return ERR_ABRT;
     }
 
-    auto* conn = server->AllocateClient(pcb);
+    auto* conn = ConnectionPool::GetInstance().Acquire();;
     if (!conn) {
         ESP_LOGE(TAG, "Failed to create connection obj.");
         tcp_abort(pcb);
         return ERR_ABRT;
     }
+    conn->Init(pcb);
     conn->SetNoDelay(server->nodelay_);
-    if (server->on_accept_) {
-        auto ok = MyBackground::GetInstance().Schedule(
-            "TcpAccept",
-            [](void* ctx) {
-                auto* conn = reinterpret_cast<AsyncConnection*>(ctx);
-                auto* server = conn->server_;
-                server->on_accept_(server->on_accept_arg_, conn);
-            }, 
-            [](void* ctx, bool was_run) { 
-                if (!was_run) {
-                    auto* conn = reinterpret_cast<AsyncConnection*>(ctx);
-                    tcp_close(conn->pcb_);
-                    conn->pcb_ = nullptr;
-                }
-            },    
-            conn
-        );
-        if (!ok) {
-            ESP_LOGE(TAG, "Failed to Schedule Accept task to bg.");
-            server->RecycleClient(conn);
-            return ESP_FAIL;
-        }
+    conn->TransitionTo(ConnectionState::k_Established);
+    auto ok = MyBackground::GetInstance().Schedule<AcceptTask>(
+        "TcpAccept",
+        server,
+        conn
+    );
+    if (!ok) {
+        ESP_LOGE(TAG, "Failed to Schedule Accept task to bg.");
+        conn->TransitionTo(ConnectionState::k_Closed);
+        ConnectionPool::GetInstance().Release(conn);
+        return ESP_FAIL;
     }
 
     return ERR_OK;
