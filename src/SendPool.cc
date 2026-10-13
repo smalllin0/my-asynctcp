@@ -25,7 +25,7 @@ bool SendPool::Clear(AsyncConnection* conn, size_t size)
 
 
     bool progressed = false;
-    pool_.for_each([&](Chunk& chunk) -> bool{
+    pool_.for_each([&](Chunk& chunk) noexcept -> bool{
         if (chunk.conn != conn) return false;
 
         auto wanted = chunk.len - chunk.acked;
@@ -45,7 +45,7 @@ bool SendPool::Clear(AsyncConnection* conn, size_t size)
     
     if (!progressed) return false;
 
-    pool_.erase_if([conn](const Chunk& chunk) -> bool{
+    pool_.erase_if([conn](const Chunk& chunk) noexcept -> bool{
         return chunk.conn == conn && chunk.acked >= chunk.len;
     });
 
