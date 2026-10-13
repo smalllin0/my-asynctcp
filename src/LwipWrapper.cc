@@ -2,10 +2,6 @@
 
 namespace{
 
-struct AbortMsg {
-    tcpip_api_call_data base;
-    tcp_pcb*    pcb;
-};
 
 struct CloseMsg {
     tcpip_api_call_data base;
@@ -44,35 +40,12 @@ struct RegisterMsg {
 
 struct ApiCallMsg {
     tcpip_api_call_data base;
-    size_t              len;
     void*               ctx;
-    size_t (*cb)(void*);
-};
-
-struct ServerBeginMsg {
-    tcpip_api_call_data base;
-    tcp_pcb*            listen_pcb;
-    const ip_addr_t*    ip;
-    uint16_t            port;
-    uint8_t             backlog;
-    void*               ctx;
-    err_t (*accept_cb)(void*, tcp_pcb*, err_t);
+    void (*cb)(void*);
 };
 
 }   // namespace
 
-
-void LwipAbort(tcp_pcb* pcb)
-{
-    if (!pcb) return;
-
-    AbortMsg msg{{}, pcb};
-    tcpip_api_call([](tcpip_api_call_data* d) -> err_t {
-        AbortMsg* m = (AbortMsg*)d;
-        tcp_abort(m->pcb);
-        return ERR_OK;
-    }, &msg.base);
-}
 
 err_t LwipClose(tcp_pcb* pcb)
 {
@@ -154,54 +127,17 @@ void LwipRegisterCallbacks(tcp_pcb* pcb, void* arg,
 
 /// @brief 将函数投入Lwip中运行....函数名可能要改，LwipRawWrite??
 /// @param pcb 
-/// @param f 
+/// @param fn 
 /// @param ctx 
-size_t LwipApiCall(tcp_pcb* pcb, void* ctx, size_t(*f)(void* ctx))
+err_t LwipApiCall(void* ctx, void (*fn)(void* ctx))
 {
-    if (!pcb || !f) return 0;
+    if (!fn) return ERR_ARG;
 
-    ApiCallMsg msg{{}, 0, ctx, f};
+    ApiCallMsg msg{{}, ctx, fn};
 
-    tcpip_api_call([](tcpip_api_call_data* d) -> err_t {
+    return tcpip_api_call([](tcpip_api_call_data* d) -> err_t {
         auto* m = (ApiCallMsg*)d;
-        m->len = m->cb(m->ctx);
+        m->cb(m->ctx);
         return ERR_OK;
     }, &msg.base);
-    return msg.len;
-}
-
-tcp_pcb* LwipServerBegin(const ip_addr_t* ip, u16_t port, uint8_t backlog,
-                         void* ctx, err_t(*accept)(void* ctx, tcp_pcb* pcb, err_t))
-{
-    if(!ip || backlog == 0) return nullptr;
-
-    ServerBeginMsg msg{{}, nullptr, ip, port, backlog, ctx, accept};
-    tcpip_api_call([](tcpip_api_call_data* d) -> err_t {
-        auto* pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
-        if (!pcb) return ERR_MEM;
-
-        // 绑定地址、端口
-        auto* m = (ServerBeginMsg*)d;
-        auto err = tcp_bind(pcb, m->ip, m->port);
-        if (err != ERR_OK) {
-            tcp_abort(pcb);
-            return err;
-        }
-
-        // 监听连接
-        auto* listen_pcb = tcp_listen_with_backlog(pcb, m->backlog);
-        if (!listen_pcb) {
-            tcp_abort(pcb);
-            return ERR_MEM;
-        }
-
-        // 设置回调函数
-        tcp_arg(listen_pcb, m->ctx);
-        tcp_accept(listen_pcb, m->accept_cb);
-
-        m->listen_pcb = listen_pcb;
-        return ERR_OK;
-    }, &msg.base);
-
-    return msg.listen_pcb;
 }
