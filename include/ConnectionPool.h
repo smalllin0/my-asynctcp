@@ -15,6 +15,7 @@ public:
 
     AsyncConnection* Acquire();
     void Release(AsyncConnection* conn);
+    void OnRelease(void* ctx, void(*cb)(void* ctx));
 
 
 private:
@@ -27,8 +28,10 @@ private:
     ConnectionPool& operator=(ConnectionPool&&) = delete;
 
 
+    void PushToPool(AsyncConnection* conn);
 
 
+    void (*on_release_)(void*);     void* on_release_ctx_;
     std::atomic<AsyncConnection*>   pool_{nullptr};
     TimerHandle_t                   timer_{nullptr};
 
