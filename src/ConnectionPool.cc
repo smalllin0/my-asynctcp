@@ -59,13 +59,16 @@ void ConnectionPool::OnRelease(void* ctx, void(*cb)(void* ctx))
     }
 }
 
+/// @brief 回调连接
+/// @note 必需是k_Closed状态的连接才能回收，虽然events_为0时可能还有事件产生（如缓冲区要发送）
+/// @param conn 
 void ConnectionPool::Release(AsyncConnection* conn)
 {
     // assert(conn && conn->state_.load() == ConnectionState::k_Closed);
     if (on_release_) on_release_(on_release_ctx_);
     PushToPool(conn);
     if (timer_) xTimerReset(timer_, 0);
-    ESP_LOGI(TAG, "ConnectionPool::Release %p", conn);
+    // ESP_LOGI(TAG, "ConnectionPool::Release %p", conn);
 }
 
 AsyncConnection* ConnectionPool::Acquire()
@@ -85,6 +88,5 @@ AsyncConnection* ConnectionPool::Acquire()
 
     conn->next_ = nullptr;
     if(timer_) xTimerReset(timer_, 0);
-    ESP_LOGI(TAG, "Acquire connection %p", conn);
     return conn;
 }

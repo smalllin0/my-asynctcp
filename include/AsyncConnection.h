@@ -13,16 +13,46 @@
 class AsyncServer;
 class AsyncConnection;
 
-using SentCb        = void (*)(void* arg, size_t len, uint32_t time);
+// ============================================================
+// 回调类型
+// ============================================================
+
 using DataCb        = void (*)(void* arg, void* data, size_t len);
 using PollCb        = void (*)(void* arg);
 using ConnectCb     = void (*)(void* arg, AsyncConnection* c);
-using DisconnectCb  = void (*)(void* arg);
 using ErrorCb       = void (*)(void* arg, err_t error);
-using TimeoutCb     = void (*)(void* arg, uint32_t time);
-using RecycleCb     = void (*)(void* arg);       // 回收函数
+using RecycleCb     = void (*)(void* arg);
 
+/// @brief 发送队列排空回调
+/// @note 在 SendPool 中本连接的所有 chunk 全部 ACK 后触发
+///       在 SentTask 后台线程调用，回调里可调 Append/Flush
+///       不能在回调里调 erase_if（与 SentTask 内部遍历冲突）
+using DrainCb       = void (*)(void* arg);
 
+// ============================================================
+// AsyncConnection
+// ============================================================
+
+/// @brief 异步 TCP 连接对象
+///
+/// 【状态机】
+///   k_Idle → k_Initialized → k_Established
+///         → k_HalfClosedRemote（对端 FIN，本端仍可发）
+///         → k_HalfClosedLocal （本端 Close，仍可收）
+///         → k_Closing → k_Closed → k_Recycled
+///
+/// 【线程模型】
+///   - lwip 回调（Receive / Sent / Error / Poll）运行在 tcpip 线程
+///   - 所有业务回调（OnConnect / OnData / OnError / OnPoll / OnRelease / OnDrain）
+///     运行在 MyBackground 后台线程
+///   - 公共 API（Connect / Close / Append / Flush）应在非 tcpip 线程调用
+///
+/// 【关闭前置条件】
+///   TryClose 执行真正的 tcp_close 需同时满足：
+///     1. state ∈ {k_HalfClosedLocal, k_Closing}
+///     2. SendPool 中本连接无 chunk（数据已发完）
+///     3. events_ == 0（无后台任务正在访问）
+///   任一不满足，关闭推迟到下一个后台任务析构时再试
 class AsyncConnection {
 public:
     struct SentTask;
@@ -34,165 +64,86 @@ public:
     friend struct RecvTask;
     friend struct ErrTask;
     friend struct PollTask;
+
 public:
     AsyncConnection();
     ~AsyncConnection();
 
-    bool    IsSendding();
+    
     bool    Connect(ip_addr_t* addr, uint16_t port);
-    // err_t   Connect(const char* name, uint16_t port);
-    void    Close(bool now=false);
-    size_t  SendBufferSize();
-    size_t  Add(const void* data, size_t size, uint8_t apiflags=TCP_WRITE_FLAG_MORE);
-    bool    Send();
-    size_t  Write(const void* data, uint16_t size, uint8_t apiflags=TCP_WRITE_FLAG_COPY);
-    bool    Append(const void* data, size_t len, uint8_t apiflags, CompeleteCb cb = nullptr, void* ctx = nullptr);
+    void    Close();
+    bool    Append(const void* data, size_t len, uint8_t apiflags,
+                   CompeleteCb cb = nullptr, void* ctx = nullptr);
     size_t  Flush();
 
+    tcp_state GetConnectionState() { return pcb_ ? pcb_->state : CLOSED; }
+    uint16_t  GetMSS()             { return pcb_ ? tcp_mss(pcb_) : 0; }
+    uint16_t  GetRxTimeout()       { return rx_timeout_second_; }
+    // uint32_t  GetAckTimeout()      { return ack_timeout_ms_; }
+    bool      GetNoDalayState()    { return nodelay_; }
+    ip_addr_t GetRemouteIp() { return pcb_ ? pcb_->remote_ip : (ip_addr_t)IPADDR4_INIT(0); }
+    ip_addr_t GetLocalIp()   { return pcb_ ? pcb_->local_ip  : (ip_addr_t)IPADDR4_INIT(0); }
+    uint16_t  GetRemotePort(){ return pcb_ ? pcb_->remote_port : 0; }
+    uint16_t  GetLocalPort() { return pcb_ ? pcb_->local_port  : 0; }
 
-    /// @brief 获取连接状态
-    tcp_state   GetConnectionState() {
-        return IsActive() ? pcb_->state : CLOSED;
-    }
-    /// @brief 获取当前连接最大报文段长度（Maximum Segment Size）
-    uint16_t    GetMSS() {
-        return IsActive() ? tcp_mss(pcb_) : 0;
-    }
-    uint16_t    GetRxTimeout() {
-        return rx_timeout_second_;
-    }
-    void        SetRxTimeout(uint16_t second) {
-        rx_timeout_second_ = second;
-    }
-    uint32_t    GetAckTimeout() {
-        return ack_timeout_ms_;
-    }
-    void        SetAckTimeout(uint32_t ms) {
-        ack_timeout_ms_ = ms;
-    }
-    /// @brief 获取低延时功能启用状态
-    bool        GetNoDalayState() {
-        return IsActive() ? nodelay_ : false;
-    }
-    void        SetNoDelay(bool nodelay) {
-        if (IsActive()) {
-            nodelay_ = nodelay;
-            if (nodelay) {
-                tcp_nagle_disable(pcb_);
-            } else {
-                tcp_nagle_enable(pcb_);
-            }
+    void SetRxTimeout(uint16_t second) { rx_timeout_second_ = second; }
+    // void SetAckTimeout(uint32_t ms)    { ack_timeout_ms_ = ms; }    
+    void SetNoDelay(bool nodelay) {
+        if (nodelay) {
+            tcp_nagle_disable(pcb_);
+        } else {
+            tcp_nagle_enable(pcb_);
         }
     }
-    ip_addr_t   GetRemouteIp() {
-        return pcb_ ? pcb_->remote_ip : (ip_addr_t)IPADDR4_INIT(0);
-    }
-    ip_addr_t   GetLocalIp() {
-        return pcb_ ? pcb_->local_ip : (ip_addr_t)IPADDR4_INIT(0);
-    }
-    uint16_t    GetRemotePort() {
-        return pcb_ ? pcb_->remote_port : 0;
-    }
-    uint16_t    GetLocalPort() {
-        return pcb_ ? pcb_->local_port : 0;
-    }
-    /// @brief 设置是否延迟ACK确认
-    void SetDeferAck(bool defer) {
-        defer_ack_ = defer;
-    }
+    void SetDeferAck(bool defer) { defer_ack_ = defer; }
 
-
-    /// @brief 业务型回调，设置连接成功回调函数
-    void OnConnect(ConnectCb cb, void* arg = nullptr) {
-        on_connect_ = cb;
-        on_connect_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置断开连接后回调函数
-    void    OnDisconnect(DisconnectCb cb, void* arg = nullptr) {
-        on_disconnect_ = cb;
-        on_disconnect_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置数据发送完成回调函数
-    void    OnSent(SentCb cb, void* arg = nullptr) {
-        on_sent_ = cb;
-        on_sent_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置连接异常回调函数
-    void    OnError(ErrorCb cb, void* arg = nullptr) {
-        on_error_ = cb;
-        on_error_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置接收到数据包后的回调函数（不需要释放数据包，存在拷贝时延迟）
-    void    OnData(DataCb cb, void* arg = nullptr) {
-        on_data_ = cb;
-        on_data_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置发送超时回调函数（默认关闭连接）
-    void    OnTimeout(TimeoutCb cb, void* arg = nullptr) {
-        on_timeout_ = cb;
-        on_timeout_arg_ = arg;
-    }
-    /// @brief 业务型回调，设置定期轮询回调函数
-    void    OnPoll(PollCb cb, void* arg = nullptr) {
-        on_poll_ = cb;
-        on_poll_arg_ = arg;
-    }
-
-    /// @brief 资源型回调，设置回收时的回调函数（上层对象析构时所有的资源回收都应在这里完成）
-    void    OnRelease(RecycleCb cb, void* arg) {
-        on_recycle_ = cb;
-        on_recycle_arg_ = arg;
-    }
+    void OnConnect(ConnectCb cb, void* arg = nullptr) { on_connect_ = cb; on_connect_arg_ = arg; }
+    void OnError(ErrorCb cb, void* arg = nullptr)     { on_error_   = cb; on_error_arg_   = arg; }
+    void OnData(DataCb cb, void* arg = nullptr)       { on_data_    = cb; on_data_arg_    = arg; }
+    void OnPoll(PollCb cb, void* arg = nullptr)       { on_poll_    = cb; on_poll_arg_    = arg; }
+    void OnRelease(RecycleCb cb, void* arg)           { on_recycle_ = cb; on_recycle_arg_ = arg; }
+    void OnDrain(DrainCb cb, void* arg = nullptr)     { on_drain_   = cb; on_drain_arg_   = arg; }
 
 private:
-    
-
-
-
-
-
-
-
-
+    friend class ConnectionPool;
     friend class AsyncServer;
-    
 
-    void Init(AsyncServer* server, tcp_pcb* pcb);
-    void InitClient();
-    bool IsActive();
-    void Recycle();
+    void Init(tcp_pcb* pcb);
+    void IncPending();
+    void DecPending();
+    void TryClose();
+    void TryRelease();
+    bool CanAppend();
+    bool CanFlush();
+    bool CanReceive();
+    void TransitionTo(ConnectionState new_state) noexcept;
     void HandleReceiveEvent(pbuf* pb);
-    void HandleFinEvent();
-    void HandleErrorEvent(err_t err);
     void HandlePollEvent();
     void HandleConnectEvent();
     void HandleSentEvent(uint16_t len);
 
+    // ---------------------------------------------------------
+    // 数据成员
+    // ---------------------------------------------------------
 
-    std::atomic<size_t> events_{0};             // 关联的事件数据是多少
-    size_t              unack_rx_bytes_{0};     // 尚未确认字节数
-    uint32_t            last_rx_ms_;            // 最后接收数据时间戳
-    uint32_t            last_tx_ms_;            // 最后发送数据时间戳
-    uint32_t            ack_timeout_ms_;        // ACK超时时间（毫秒）
-    uint16_t            rx_timeout_second_{0};  // 接收超时时间（秒）
-    ConnectionState     state_{ConnectionState::k_Idle};
-    bool                nodelay_{false};
-    bool                defer_ack_{false};      // 是否延迟发送ACK
-    tcp_pcb*            pcb_{nullptr};          // 关联的协议控制块
-    AsyncServer*        server_{nullptr};
-    AsyncConnection*    next_{nullptr};
-    EventGroupHandle_t  event_group_{nullptr};
+    std::atomic<size_t>             events_{0};
+    size_t                          unack_rx_bytes_{0};
+    uint32_t                        last_rx_ms_;
+    uint32_t                        last_tx_ms_;
+    uint32_t                        ack_timeout_ms_;
+    uint16_t                        rx_timeout_second_{0};
+    bool                            nodelay_{false};
+    bool                            defer_ack_{false};
+    tcp_pcb*                        pcb_{nullptr};
+    AsyncConnection*                next_{nullptr};
+    std::atomic<ConnectionState>    state_{ConnectionState::k_Idle};
 
-    ConnectCb       on_connect_{nullptr};       void* on_connect_arg_{nullptr};     // 连接成功回调函数
-    DisconnectCb    on_disconnect_{nullptr};    void* on_disconnect_arg_{nullptr};  // 连接断开回调函数
-    SentCb          on_sent_{nullptr};          void* on_sent_arg_{nullptr};        // 数据发送完成回调函数
-    ErrorCb         on_error_{nullptr};         void* on_error_arg_{nullptr};       // 错误事件回调
-    DataCb          on_data_{nullptr};          void* on_data_arg_{nullptr};        // 数据接收回调
-    TimeoutCb       on_timeout_{nullptr};       void* on_timeout_arg_{nullptr};     // 超时事件回调
-    PollCb          on_poll_{nullptr};          void* on_poll_arg_{nullptr};        // 轮询事件回调
-    RecycleCb       on_recycle_{nullptr};       void* on_recycle_arg_{nullptr};     // 回收事件回调
-        
+    ConnectCb       on_connect_{nullptr};       void* on_connect_arg_{nullptr};
+    ErrorCb         on_error_{nullptr};         void* on_error_arg_{nullptr};
+    DataCb          on_data_{nullptr};          void* on_data_arg_{nullptr};
+    PollCb          on_poll_{nullptr};          void* on_poll_arg_{nullptr};
+    RecycleCb       on_recycle_{nullptr};       void* on_recycle_arg_{nullptr};
+    DrainCb         on_drain_{nullptr};         void* on_drain_arg_{nullptr};
 };
 
-
-#endif
+#endif  // MY_ASYNC_CONNECTION_H_

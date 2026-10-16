@@ -18,11 +18,11 @@ enum class ConnectionState : uint8_t {
 
     // 半关闭
     k_HalfClosedRemote,   // 收到对端 FIN，本端仍可发送（CLOSE_WAIT）
-    k_HalfClosedLocal,    // 本端已发 FIN，仍可接收（FIN_WAIT_1/2）
+    k_HalfClosedLocal,    // 本端不再写入数据，即将已有缓冲区后发送 FIN，仍可接收（FIN_WAIT_1/2）
 
     // 关闭
     k_TlsClosing,         // 【可选】TLS close_notify 交互中
-    k_Closing,            // 双向 FIN 已发，等双方确认（LAST_ACK / CLOSING）
+    k_Closing,            // 正在关闭（事件events_归零、发送队列处理完毕）
     k_Closed,             // 底层已断开，等 events_ 清零
 
     // 回收
@@ -44,14 +44,6 @@ inline const char* ToString(ConnectionState state) noexcept {
         case ConnectionState::k_Closed: return "Closed";
         case ConnectionState::k_Recycled: return "Recycled";
     }
-}
-
-inline bool CanSend(ConnectionState state) noexcept {
-    return state == ConnectionState::k_Established || state == ConnectionState::k_HalfClosedRemote;
-}
-
-inline bool CanReceive(ConnectionState state) noexcept {
-    return state == ConnectionState::k_Established || state == ConnectionState::k_HalfClosedLocal;
 }
 
 #endif  // MY_ASYNCTCP_INCLUDE_CONNECTIONSTATE_H_

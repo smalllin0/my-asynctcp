@@ -67,6 +67,7 @@ void AsyncServer::Begin()
             err = ERR_MEM;
             return;
         }
+        server->pcb_ = listen_pcb;
 
         // 设置回调函数
         tcp_arg(listen_pcb, server);
@@ -113,18 +114,12 @@ struct AsyncServer::AcceptTask : BgTask {
     ~AcceptTask() override {
         auto* d = get<Data>();
         if (!d) return;
+        auto* conn = d->conn;
 
+        conn->DecPending();
         if (!executed) {
-            LwipApiCall(d, [](void* ctx){
-                auto* conn = reinterpret_cast<Data*>(ctx)->conn;
-                auto err = tcp_close(conn->pcb_);
-                if (err != ERR_OK) {
-                    tcp_abort(conn->pcb_);
-                }
-                conn->pcb_ = nullptr;
-                conn->TransitionTo(ConnectionState::k_Closed);
-                ConnectionPool::GetInstance().Release(conn);
-            });
+            conn->TransitionTo(ConnectionState::k_Closed);
+            conn->TryRelease();
         }
     }
     protected:
@@ -134,7 +129,7 @@ struct AsyncServer::AcceptTask : BgTask {
         
         auto* server = d->server;
         auto* conn = d->conn;
-        server->on_accept_(server->on_accept_arg_, conn);
+        if(server->on_accept_) server->on_accept_(server->on_accept_arg_, conn);
     }
 };
 
@@ -157,6 +152,7 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
     conn->Init(pcb);
     conn->SetNoDelay(server->nodelay_);
     conn->TransitionTo(ConnectionState::k_Established);
+    conn->IncPending();
     auto ok = MyBackground::GetInstance().Schedule<AcceptTask>(
         "TcpAccept",
         server,
@@ -164,7 +160,10 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
     );
     if (!ok) {
         ESP_LOGE(TAG, "Failed to Schedule Accept task to bg.");
+        auto& pcb = conn->pcb_;
+        ClosePcb(pcb);
         conn->TransitionTo(ConnectionState::k_Closed);
+        conn->DecPending();
         ConnectionPool::GetInstance().Release(conn);
         return ESP_FAIL;
     }

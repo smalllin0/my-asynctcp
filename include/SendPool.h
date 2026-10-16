@@ -41,7 +41,10 @@ struct Chunk{
     }
 };
 
-
+/// @brief 
+/// @note 由于在Lwip的所有回调中，没有碰该池的操作，
+///       因此，该池有锁但是是由单一线程操作的
+///     （LwipApiCall可以认为在后台线程在操作的），不会出现锁竞争
 class SendPool {
 public:
     
@@ -50,9 +53,11 @@ public:
         return instance;
     }
 
-
-    bool Append(AsyncConnection* conn, const void* data, size_t len, uint8_t flags, CompeleteCb cb, void* ctx);
-    bool Clear(AsyncConnection* conn, size_t size);
+    bool IsEmpty() const { return pool_.empty(); }
+    bool HasChunk(AsyncConnection* conn);
+    bool Append(AsyncConnection* conn, const void* data, size_t len, uint8_t flags, CompeleteCb cb = nullptr, void* ctx = nullptr);
+    bool Ack(AsyncConnection* conn, size_t size);
+    void Clear(AsyncConnection* conn);
 
     template<typename Fn>
     void ForEach(Fn&& fn) {
