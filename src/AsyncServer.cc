@@ -10,16 +10,6 @@ AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
     : port_(port), addr_(addr)
 {}
 
-/// @brief 清理资源
-/// @param clean_all 
-void AsyncServer::Clean(bool clean_all)
-{
-    // 调用上层清理回调清理上层资源
-    if (on_cleanup_) {
-        on_cleanup_(on_cleanup_arg_);
-    }
-}
-
 
 
 /// @brief 启动TCP服务器

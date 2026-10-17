@@ -25,7 +25,6 @@ public:
     AsyncServer(uint16_t port) : AsyncServer(IPADDR4_INIT(0), port) {}
     ~AsyncServer() {
         End();
-        Clean(true);
     }
 
     void Begin();
@@ -44,15 +43,9 @@ public:
         on_accept_ = handler;
         on_accept_arg_ = arg;
     }
-    /// @brief 设置连接清理时，上层的清理逻辑....................转移到Connection中，连接清理
-    void OnCleanup(AcCleanHandler handler, void* arg) {
-        on_cleanup_ = handler;
-        on_cleanup_arg_ = arg;
-    }
 
 private:
 
-    void Clean(bool clean_all=false);
     static err_t AcceptCb(void* ctx, tcp_pcb* pcb, err_t err);
 
     bool                        nodelay_{false};
@@ -61,7 +54,6 @@ private:
     tcp_pcb*                    pcb_{nullptr};
 
     ConnectCb       on_accept_{nullptr};    void* on_accept_arg_{nullptr};
-    AcCleanHandler  on_cleanup_{nullptr};   void* on_cleanup_arg_{nullptr};
 };
 
 #endif

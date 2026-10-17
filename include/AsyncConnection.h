@@ -9,6 +9,7 @@
 #include <atomic>
 #include "SendPool.h"
 #include "ConnectionState.h"
+#include "PoolNode.h"
 
 class AsyncServer;
 class AsyncConnection;
@@ -53,7 +54,8 @@ using DrainCb       = void (*)(void* arg);
 ///     2. SendPool 中本连接无 chunk（数据已发完）
 ///     3. events_ == 0（无后台任务正在访问）
 ///   任一不满足，关闭推迟到下一个后台任务析构时再试
-class AsyncConnection {
+class AsyncConnection;
+class AsyncConnection : public PoolNode<AsyncConnection> {
 public:
     struct SentTask;
     struct RecvTask;
@@ -106,7 +108,6 @@ public:
     void OnDrain(DrainCb cb, void* arg = nullptr)     { on_drain_   = cb; on_drain_arg_   = arg; }
 
 private:
-    friend class ConnectionPool;
     friend class AsyncServer;
 
     void Init(tcp_pcb* pcb);
@@ -136,7 +137,6 @@ private:
     bool                            nodelay_{false};
     bool                            defer_ack_{false};
     tcp_pcb*                        pcb_{nullptr};
-    AsyncConnection*                next_{nullptr};
     std::atomic<ConnectionState>    state_{ConnectionState::k_Idle};
 
     ConnectCb       on_connect_{nullptr};       void* on_connect_arg_{nullptr};
