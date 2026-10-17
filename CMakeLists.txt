@@ -7,6 +7,7 @@ idf_component_register(
         ${SOURCE_CODE}
     INCLUDE_DIRS 
         "include"
+        "src"
     REQUIRES 
         "lwip"
         "freertos"

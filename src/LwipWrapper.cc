@@ -51,7 +51,7 @@ err_t LwipApiCall(void* ctx, void (*fn)(void* ctx))
 
 /// @brief TCP 主动连接关闭处理设置
 /// @note 需要在Lwip中运行
-void ClosePcb(tcp_pcb*& pcb)
+void LwipRawClose(tcp_pcb*& pcb)
 {
     if (!pcb) return;
     tcp_arg(pcb, nullptr);

@@ -229,13 +229,7 @@ AsyncConnection::~AsyncConnection()
             auto* conn = static_cast<AsyncConnection*>(ctx);
             auto& pcb = conn->pcb_;
             if (!pcb) return;
-            tcp_arg(pcb, nullptr);
-            tcp_recv(pcb, nullptr);
-            tcp_sent(pcb, nullptr);
-            tcp_err(pcb, nullptr);
-            tcp_poll(pcb, nullptr, 0);
-            tcp_abort(pcb);
-            pcb = nullptr;
+            LwipRawClose(pcb);
         });
     }
 
@@ -291,7 +285,7 @@ void AsyncConnection::TryClose()
         auto& pcb = conn->pcb_;
         if (!pcb) return;
 
-        ClosePcb(pcb);
+        LwipRawClose(pcb);
     });
 
     TransitionTo(ConnectionState::k_Closed);

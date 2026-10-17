@@ -7,7 +7,7 @@
 #define TAG "AsyncServer"
 
 AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
-    : port_(port) , addr_(addr)
+    : port_(port), addr_(addr)
 {}
 
 /// @brief 清理资源
@@ -161,7 +161,7 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
     if (!ok) {
         ESP_LOGE(TAG, "Failed to Schedule Accept task to bg.");
         auto& pcb = conn->pcb_;
-        ClosePcb(pcb);
+        LwipRawClose(pcb);
         conn->TransitionTo(ConnectionState::k_Closed);
         conn->DecPending();
         ConnectionPool::GetInstance().Release(conn);

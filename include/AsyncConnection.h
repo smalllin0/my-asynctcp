@@ -102,6 +102,7 @@ public:
     void OnData(DataCb cb, void* arg = nullptr)       { on_data_    = cb; on_data_arg_    = arg; }
     void OnPoll(PollCb cb, void* arg = nullptr)       { on_poll_    = cb; on_poll_arg_    = arg; }
     void OnRelease(RecycleCb cb, void* arg)           { on_recycle_ = cb; on_recycle_arg_ = arg; }
+    /// @brief 连接数据发送完成回调
     void OnDrain(DrainCb cb, void* arg = nullptr)     { on_drain_   = cb; on_drain_arg_   = arg; }
 
 private:

@@ -14,7 +14,7 @@ extern err_t LwipConnect(tcp_pcb* pcb, const ip_addr_t* ip, u16_t port, void* ct
 
 extern err_t LwipApiCall(void* ctx, void(*fn)(void* ctx));
 
-extern void ClosePcb(tcp_pcb*& pcb);
+extern void LwipRawClose(tcp_pcb*& pcb);
 
                         
 #endif /* MY_ASYNC_TCP_LWIPWRAPPER_H_ */
