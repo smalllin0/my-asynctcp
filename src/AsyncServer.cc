@@ -128,7 +128,10 @@ struct AsyncServer::AcceptTask : BgTask {
 err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
 {
     auto* server = reinterpret_cast<AsyncServer*>(ctx);
-    if (err != ERR_OK || !pcb) {
+    if (!pcb) {
+        return ERR_ABRT;
+    }
+    if (err != ERR_OK) {
         tcp_abort(pcb);
         return ERR_ABRT;
     }

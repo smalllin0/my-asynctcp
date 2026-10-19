@@ -5,10 +5,10 @@
 #include "lwip/priv/tcpip_priv.h"
 #include "my_background.h"
 #include "my_linklist.h"
-#include "LwipWrapper.h"
+#include "../src/LwipWrapper.h"
 #include <atomic>
-#include "SendPool.h"
-#include "ConnectionState.h"
+#include "../src/SendPool.h"
+#include "../src/ConnectionState.h"
 #include "PoolNode.h"
 
 class AsyncServer;
@@ -18,11 +18,16 @@ class AsyncConnection;
 // 回调类型
 // ============================================================
 
+/// @brief 数据接收回调
 using DataCb        = void (*)(void* arg, void* data, size_t len);
+/// @brief 连接轮询回调
 using PollCb        = void (*)(void* arg);
+/// @brief 连接成功回调
 using ConnectCb     = void (*)(void* arg, AsyncConnection* c);
+/// @brief 连接错误回调
 using ErrorCb       = void (*)(void* arg, err_t error);
-using RecycleCb     = void (*)(void* arg);
+/// @brief 连接关闭回调
+using ReleaseCb     = void (*)(void* arg);
 
 /// @brief 发送队列排空回调
 /// @note 在 SendPool 中本连接的所有 chunk 全部 ACK 后触发
@@ -72,7 +77,6 @@ public:
     ~AsyncConnection();
 
     
-    bool    Connect(ip_addr_t* addr, uint16_t port);
     void    Close();
     bool    Append(const void* data, size_t len, uint8_t apiflags,
                    CompeleteCb cb = nullptr, void* ctx = nullptr);
@@ -91,6 +95,7 @@ public:
     void SetRxTimeout(uint16_t second) { rx_timeout_second_ = second; }
     // void SetAckTimeout(uint32_t ms)    { ack_timeout_ms_ = ms; }    
     void SetNoDelay(bool nodelay) {
+        if (!pcb_) return;
         if (nodelay) {
             tcp_nagle_disable(pcb_);
         } else {
@@ -103,12 +108,13 @@ public:
     void OnError(ErrorCb cb, void* arg = nullptr)     { on_error_   = cb; on_error_arg_   = arg; }
     void OnData(DataCb cb, void* arg = nullptr)       { on_data_    = cb; on_data_arg_    = arg; }
     void OnPoll(PollCb cb, void* arg = nullptr)       { on_poll_    = cb; on_poll_arg_    = arg; }
-    void OnRelease(RecycleCb cb, void* arg)           { on_recycle_ = cb; on_recycle_arg_ = arg; }
+    void OnRelease(ReleaseCb cb, void* arg)           { on_release_ = cb; on_release_arg_ = arg; }
     /// @brief 连接数据发送完成回调
     void OnDrain(DrainCb cb, void* arg = nullptr)     { on_drain_   = cb; on_drain_arg_   = arg; }
 
 private:
     friend class AsyncServer;
+    friend class AsyncClient;
 
     void Init(tcp_pcb* pcb);
     void IncPending();
@@ -123,6 +129,7 @@ private:
     void HandlePollEvent();
     void HandleConnectEvent();
     void HandleSentEvent(uint16_t len);
+    void HandleConnectResult(err_t err);
 
     // ---------------------------------------------------------
     // 数据成员
@@ -143,7 +150,7 @@ private:
     ErrorCb         on_error_{nullptr};         void* on_error_arg_{nullptr};
     DataCb          on_data_{nullptr};          void* on_data_arg_{nullptr};
     PollCb          on_poll_{nullptr};          void* on_poll_arg_{nullptr};
-    RecycleCb       on_recycle_{nullptr};       void* on_recycle_arg_{nullptr};
+    ReleaseCb       on_release_{nullptr};       void* on_release_arg_{nullptr};
     DrainCb         on_drain_{nullptr};         void* on_drain_arg_{nullptr};
 };
 

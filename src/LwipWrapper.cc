@@ -1,4 +1,5 @@
 #include "LwipWrapper.h"
+#include "lwip/dns.h"
 
 namespace{
 
@@ -15,6 +16,15 @@ struct ApiCallMsg {
     tcpip_api_call_data base;
     void*               ctx;
     void (*cb)(void*);
+};
+
+struct DnsMsg {
+    tcpip_api_call_data base;
+    const char* hostname;
+    ip_addr_t*  addr;
+    void*       arg;
+    void (*found)(const char*, const ip_addr_t*, void*);
+    err_t       result;
 };
 
 }   // namespace
@@ -62,4 +72,18 @@ void LwipRawClose(tcp_pcb*& pcb)
     auto err = tcp_close(pcb);
     if (err != ERR_OK) tcp_abort(pcb);
     pcb = nullptr;
+}
+
+
+err_t LwipDnsResolve(const char* hostname, ip_addr_t* addr, void* arg,
+                     void (*found)(const char*, const ip_addr_t*, void*))
+{
+    if (!hostname || !addr || !found) return ERR_ARG;
+    DnsMsg msg{{}, hostname, addr, arg, found, ERR_OK};
+    tcpip_api_call([](tcpip_api_call_data* d) -> err_t {
+        auto* m = (DnsMsg*)d;
+        m->result = dns_gethostbyname(m->hostname, m->addr, m->found, m->arg);
+        return ERR_OK;
+    }, &msg.base);
+    return msg.result;
 }

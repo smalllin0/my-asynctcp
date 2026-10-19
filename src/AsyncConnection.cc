@@ -244,7 +244,7 @@ AsyncConnection::~AsyncConnection()
     on_error_   = nullptr;
     on_data_    = nullptr;
     on_poll_    = nullptr;
-    on_recycle_ = nullptr;
+    on_release_ = nullptr;
     on_drain_   = nullptr;
 }
 
@@ -305,7 +305,7 @@ void AsyncConnection::TryRelease()
         return;
     }
 
-    if (on_recycle_) on_recycle_(on_recycle_arg_);
+    if (on_release_) on_release_(on_release_arg_);
 
     TransitionTo(ConnectionState::k_Recycled);
     ConnectionPool::GetInstance().Release(this);
@@ -369,7 +369,7 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     on_error_       = nullptr;
     on_data_        = nullptr;
     on_poll_        = nullptr;
-    on_recycle_     = nullptr;
+    on_release_     = nullptr;
     on_drain_       = nullptr;
 
     // 清空业务回调参数
@@ -377,7 +377,7 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     on_error_arg_   = nullptr;
     on_data_arg_    = nullptr;
     on_poll_arg_    = nullptr;
-    on_recycle_arg_ = nullptr;
+    on_release_arg_ = nullptr;
     on_drain_arg_   = nullptr;
 
     // 注册 LWIP 回调
@@ -501,35 +501,6 @@ void AsyncConnection::HandleSentEvent(uint16_t len)
 }
 
 
-// =============================================================
-// 连接建立（客户端）
-// =============================================================
-
-bool AsyncConnection::Connect(ip_addr_t* addr, uint16_t port)
-{
-    if (pcb_) {
-        ESP_LOGW(TAG, "当前已存在建立的连接，放弃操作.");
-        return false;
-    }
-
-    pcb_ = tcp_new_ip_type(IPADDR_TYPE_V4);
-    if (!pcb_) {
-        ESP_LOGE(TAG, "连接建立失败：创建 PCB 失败");
-        return false;
-    }
-
-    Init(pcb_);
-    TransitionTo(ConnectionState::k_TcpConnecting);
-
-    auto err = LwipConnect(pcb_, addr, port, this,
-        [](void* ctx, tcp_pcb* pcb, err_t err) -> err_t {
-            ((AsyncConnection*)ctx)->HandleConnectEvent();
-            return ERR_OK;
-        });
-
-    return err == ERR_OK;
-}
-
 
 // =============================================================
 // 关闭
@@ -632,4 +603,20 @@ void AsyncConnection::DecPending()
 void AsyncConnection::IncPending()
 {
     events_.fetch_add(1, std::memory_order_relaxed);
+}
+
+
+/// @brief 官房端连接结果处理
+void AsyncConnection::HandleConnectResult(err_t err)
+{
+    if (err == ERR_OK) {
+        HandleConnectEvent();
+        return;
+    }
+    pcb_ = nullptr;
+    SendPool::GetInstance().Clear(this);
+    TransitionTo(ConnectionState::k_Closed);
+    IncPending();
+    auto ok = MyBackground::GetInstance().Schedule<ErrTask>("ConnErr", this, err);
+    if (!ok) { DecPending(); TryRelease(); }
 }

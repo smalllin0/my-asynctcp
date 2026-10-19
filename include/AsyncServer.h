@@ -7,7 +7,7 @@
 #include "my_background.h"
 #include "lwip/priv/tcpip_priv.h"
 #include "AsyncConnection.h"
-#include "LwipWrapper.h"
+#include "../src/LwipWrapper.h"
 
 
 using AcCleanHandler = void (*)(void* arg);       // 清理函数
