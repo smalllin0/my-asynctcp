@@ -65,7 +65,7 @@ void AsyncServer::Begin()
     });
     
 
-    if (err != ESP_OK) {
+    if (err != ESP_OK || msg.err != ESP_OK) {
         ESP_LOGE(TAG, "服务启动：[ 失败 ]");
     } else {
         ESP_LOGI(TAG, "服务启动: [ 成功 ]");
@@ -108,6 +108,10 @@ struct AsyncServer::AcceptTask : BgTask {
 
         conn->DecPending();
         if (!executed) {
+            LwipApiCall(conn, [](void* ctx){
+                auto* conn = reinterpret_cast<AsyncConnection*>(ctx);
+                LwipRawClose(conn->pcb_);
+            });
             conn->TransitionTo(ConnectionState::k_Closed);
             conn->TryRelease();
         }
