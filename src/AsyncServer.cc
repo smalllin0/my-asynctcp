@@ -17,11 +17,11 @@ void AsyncServer::Begin()
 {
 
     if (pcb_) {
-        ESP_LOGE(TAG, "服务启动：[ 失败 ] 服务已在运行");
+        ESP_LOGE(TAG, "服务启动：失败［ 服务已在运行 ]");
         return;
     }
     if (!on_accept_) {
-        ESP_LOGE(TAG, "服务启动：[ 失败 ] 处理回调未设置");
+        ESP_LOGE(TAG, "服务启动：失败［ 处理函数未设置 ]");
         return;
     }
 
@@ -66,9 +66,9 @@ void AsyncServer::Begin()
     
 
     if (err != ESP_OK || msg.err != ESP_OK) {
-        ESP_LOGE(TAG, "服务启动：[ 失败 ]");
+        ESP_LOGE(TAG, "服务启动：失败");
     } else {
-        ESP_LOGI(TAG, "服务启动: [ 成功 ]");
+        ESP_LOGI(TAG, "服务启动：成功");
     }      
 }
 
@@ -142,7 +142,7 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
 
     auto* conn = ConnectionPool::GetInstance().Acquire();;
     if (!conn) {
-        ESP_LOGE(TAG, "Failed to create connection obj.");
+        ESP_LOGE(TAG, "获取连接对象失败.");
         tcp_abort(pcb);
         return ERR_ABRT;
     }
@@ -156,7 +156,7 @@ err_t AsyncServer::AcceptCb(void* ctx, tcp_pcb* pcb, err_t err)
         conn
     );
     if (!ok) {
-        ESP_LOGE(TAG, "Failed to Schedule Accept task to bg.");
+        ESP_LOGE(TAG, "连接创建任务调度失败.");
         auto& pcb = conn->pcb_;
         LwipRawClose(pcb);
         conn->TransitionTo(ConnectionState::k_Closed);
