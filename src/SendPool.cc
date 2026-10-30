@@ -27,10 +27,10 @@ bool SendPool::Ack(AsyncConnection* conn, size_t size)
 
     bool progressed = false;
     pool_.for_each([&](Chunk& chunk) noexcept -> bool{
-        if (chunk.conn != conn) return false;
+        if (chunk.conn != conn) return true;
 
         auto wanted = chunk.len - chunk.acked;
-        if (wanted == 0) return false;
+        if (wanted == 0) return true;
 
         if (size >= wanted) {
             chunk.acked = chunk.len;
@@ -39,8 +39,9 @@ bool SendPool::Ack(AsyncConnection* conn, size_t size)
         } else {
             chunk.acked += size;
             size = 0;
+            return false;   // 数据确认完毕时终止遍历
         }
-        return size == 0;   // 数据确认完毕时终止遍历
+        return true; 
     });
     
     if (!progressed) return false;
@@ -67,8 +68,9 @@ bool SendPool::HasChunk(AsyncConnection* conn)
 
     bool found = false;
     pool_.for_each([&](const Chunk& chunk) noexcept -> bool{
-        found = (chunk.conn == conn);
-        return found;
+        if (chunk.conn != conn) return true;
+        found = true;
+        return false;
     });
     return found;
 }
