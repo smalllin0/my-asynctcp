@@ -552,25 +552,38 @@ bool AsyncConnection::Append(const void* data, size_t len, uint8_t apiflags,
     return true;
 }
 
+/// @brief 把本连接在 SendPool 中的待发数据推入 lwip
+/// @return 本次实际写入 lwip 的字节数
+/// @pre 非 tcpip 线程（内部通过 LwipApiCall 切到 tcpip 执行）
+/// @note 只处理当前连接数据，其他连接的数据一律跳过，
 size_t AsyncConnection::Flush()
 {
     if (SendPool::GetInstance().IsEmpty()) return 0;
 
-    size_t flush_size = 0;
+    struct FlushMsg {
+        AsyncConnection* conn;      // 要刷新的连接（即 this）
+        size_t           size;      // 本次写入字节数，回传给调用方
+    };
+    FlushMsg msg{this, 0};
 
-    LwipApiCall(&flush_size, [](void* ctx) {
-        auto& size = *(size_t*)ctx;
+    LwipApiCall(&msg, [](void* ctx) {
+        auto& m = *static_cast<FlushMsg*>(ctx);
 
-        SendPool::GetInstance().ForEach([&](Chunk& chunk) noexcept {
-            if (chunk.sent >= chunk.len) return false;
+        // 连接维度的前置条件只需检查一次：pcb 与状态都是本连接的
+        // 整个线程在 tcpip 线程内，所以 pcb 不会变
+        auto*& pcb = m.conn->pcb_;
+        if (!pcb || !m.conn->CanFlush()) return;
 
-            auto* conn = chunk.conn;
-            if (!conn || !conn->CanFlush()) return false;
-            auto& pcb = conn->pcb_;
-            if (!pcb) return false;
 
-            uint16_t room = tcp_sndbuf(pcb);
-            if (room == 0) return false;
+        uint16_t room = tcp_sndbuf(pcb);
+
+
+        SendPool::GetInstance().ForEach([&](Chunk& chunk) noexcept -> bool {
+            // 回调返回值：true = 继续遍历，false = 提前终止（my-linklist 1.3.0+）
+            if (chunk.conn != m.conn) return true;       // 其他连接，跳过继续
+            if (chunk.sent >= chunk.len) return true;    // 本片已写完，继续下一片
+
+            if (room == 0) return false;                 // 窗口满，剩余留待下次事件
 
             size_t chunk_left = chunk.len - chunk.sent;
             auto* src = static_cast<const uint8_t*>(chunk.data) + chunk.sent;
@@ -579,15 +592,19 @@ size_t AsyncConnection::Flush()
             if (will_send < chunk_left) flags |= TCP_WRITE_FLAG_MORE;
 
             auto err = tcp_write(pcb, src, will_send, flags);
-            if (err == ERR_OK) {
-                chunk.sent += will_send;
-                size += will_send;
-                tcp_output(pcb);
-            }
-            return false;
+            // room 是本地快照，不知道 lwip 的 TCP_SND_QUEUELEN 约束，
+            // 所以 ERR_MEM 可能先于 room==0 出现；此时后续片也一定写不进
+            if (err != ERR_OK) return false;
+
+            chunk.sent += will_send;
+            m.size     += will_send;
+            room       -= will_send;
+            return true;                                 // 继续下一片
         });
+        if (m.size) tcp_output(pcb);    // 添加了数据，统一发送
     });
-    return flush_size;
+
+    return msg.size;
 }
 
 
