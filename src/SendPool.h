@@ -29,7 +29,7 @@ struct Chunk{
         acked = 0;
     }
     ~Chunk() {
-        if (conn && cb) cb(ctx, acked);     // 应当在判断连接是否有效的情况下调用回调....这里有问题的
+        if (cb) cb(ctx, acked);     // 无论连接是否存活，均执行回调
         conn = nullptr;
         data = nullptr;
         len = 0;
