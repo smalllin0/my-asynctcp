@@ -102,7 +102,8 @@ public:
             tcp_nagle_enable(pcb_);
         }
     }
-    void SetDeferAck(bool defer) { defer_ack_ = defer; }
+    /// @brief 这是一个空实现，只为兼容旧接口
+    void SetDeferAck(bool defer) {}
 
     void OnConnect(ConnectCb cb, void* arg = nullptr) { on_connect_ = cb; on_connect_arg_ = arg; }
     void OnError(ErrorCb cb, void* arg = nullptr)     { on_error_   = cb; on_error_arg_   = arg; }
@@ -136,13 +137,12 @@ private:
     // ---------------------------------------------------------
 
     std::atomic<size_t>             events_{0};
-    size_t                          unack_rx_bytes_{0};
+    std::atomic<size_t>             ack_rx_bytes_{0};         // 已经接收完成字节数
     uint32_t                        last_rx_ms_;
     uint32_t                        last_tx_ms_;
     uint32_t                        ack_timeout_ms_;
     uint16_t                        rx_timeout_second_{0};
     bool                            nodelay_{false};
-    bool                            defer_ack_{false};
     tcp_pcb*                        pcb_{nullptr};
     std::atomic<ConnectionState>    state_{ConnectionState::k_Idle};
 

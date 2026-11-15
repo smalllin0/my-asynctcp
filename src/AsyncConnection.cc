@@ -17,10 +17,6 @@
 
 
 
-// =============================================================
-// 后台任务定义
-// =============================================================
-
 // -------------------------------------------------------------
 // 发送完成任务
 // -------------------------------------------------------------
@@ -87,23 +83,7 @@ struct AsyncConnection::RecvTask : BgTask {
         auto tot_len = d->len;
 
         if (tot_len) {
-            if (conn->defer_ack_) {
-                conn->unack_rx_bytes_ += tot_len;
-            } else {
-                struct RecvMsg {
-                    AsyncConnection*    conn;
-                    uint16_t            len;
-                };
-                
-                RecvMsg msg = { conn, tot_len };
-                LwipApiCall(&msg, [](void* ctx){
-                    auto* m = (RecvMsg*)ctx;
-                    auto& pcb = m->conn->pcb_;
-
-                    if(!pcb) return;
-                    tcp_recved(pcb, m->len);
-                });
-            }
+            conn->ack_rx_bytes_.fetch_add(tot_len, std::memory_order_relaxed);
         }
         pbuf_free(pb);
 
@@ -352,17 +332,16 @@ bool AsyncConnection::CanReceive()
 
 void AsyncConnection::Init(tcp_pcb* pcb)
 {
-    unack_rx_bytes_    = 0;
     last_rx_ms_        = SystemInfo::GetMsSinceStart();
     last_tx_ms_        = last_rx_ms_;
     // ack_timeout_ms_    = CONFIG_ASYNC_MAX_ACK_TIME;
     rx_timeout_second_ = 0;
     nodelay_           = false;
-    defer_ack_         = false;
     pcb_               = pcb;
 
     state_.store(ConnectionState::k_Initialized, std::memory_order_release);
     events_.store(0, std::memory_order_release);
+    ack_rx_bytes_.store(0, std::memory_order_release);
 
     // 清空业务回调
     on_connect_     = nullptr;
@@ -385,6 +364,16 @@ void AsyncConnection::Init(tcp_pcb* pcb)
 
     tcp_recv(pcb_, [](void* ctx, tcp_pcb* pcb, pbuf* pb, err_t err) -> err_t {
         auto* conn = static_cast<AsyncConnection*>(ctx);
+        // 处理上次数据
+        auto ack = conn->ack_rx_bytes_.exchange(0, std::memory_order_relaxed);
+        if (ack) {
+            auto bytes = static_cast<uint16_t>(std::min<size_t>(ack, 0xFFFFu));
+            if (bytes < ack) {
+                conn->ack_rx_bytes_.fetch_add(ack - bytes, std::memory_order_relaxed);
+            }
+            tcp_recved(pcb, bytes);
+        }
+
         if (pb) {
             conn->HandleReceiveEvent(pb);
         } else {
@@ -396,7 +385,7 @@ void AsyncConnection::Init(tcp_pcb* pcb)
                 // 不能直接 LwipApiCall；空任务的析构里 DecPending + TryClose）
                 conn->IncPending();
                 auto ok = MyBackground::GetInstance().Schedule(
-                    "TcpAfterFin",
+                    "TcpFin",
                     [](void* /*c*/) { /* no-op */ },
                     [](void* c, bool) {
                         auto* self = static_cast<AsyncConnection*>(c);
@@ -437,6 +426,15 @@ void AsyncConnection::Init(tcp_pcb* pcb)
 
     tcp_poll(pcb_, [](void* ctx, tcp_pcb* pcb) -> err_t {
         auto* conn = static_cast<AsyncConnection*>(ctx);
+        // 延迟释放ack窗口
+        auto len = conn->ack_rx_bytes_.exchange(0, std::memory_order_relaxed);
+        if (len ) {
+            auto bytes = static_cast<uint16_t>(std::min<size_t>(len, 0xFFFFu));
+            if (bytes < len) {
+                conn->ack_rx_bytes_.fetch_add(len - bytes, std::memory_order_relaxed);
+            }
+            tcp_recved(conn->pcb_, bytes);
+        }
         conn->HandlePollEvent();
         return ERR_OK;
     }, CONFIG_ASYNC_POLL_TIME);
@@ -450,7 +448,6 @@ void AsyncConnection::Init(tcp_pcb* pcb)
 void AsyncConnection::HandleReceiveEvent(pbuf* pb)
 {
     last_rx_ms_ = SystemInfo::GetMsSinceStart();
-    defer_ack_ = false;
 
     IncPending();
     auto ok = MyBackground::GetInstance().Schedule<RecvTask>(
