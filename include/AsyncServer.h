@@ -10,16 +10,11 @@
 #include "../src/LwipWrapper.h"
 
 
-using AcCleanHandler = void (*)(void* arg);       // 清理函数
 
-
-class AsyncConnection;
 
 class AsyncServer {
 public:
     struct AcceptTask;
-    friend struct AcceptTask;
-
 
     AsyncServer(ip_addr_t addr, uint16_t port);
     AsyncServer(uint16_t port) : AsyncServer(IPADDR4_INIT(0), port) {}
@@ -48,10 +43,10 @@ private:
 
     static err_t AcceptCb(void* ctx, tcp_pcb* pcb, err_t err);
 
-    bool                        nodelay_{false};
-    uint16_t                    port_;
-    ip_addr_t                   addr_;
-    tcp_pcb*                    pcb_{nullptr};
+    bool            nodelay_{false};
+    uint16_t        port_;
+    ip_addr_t       addr_;
+    tcp_pcb*        pcb_{nullptr};
 
     ConnectCb       on_accept_{nullptr};    void* on_accept_arg_{nullptr};
 };
