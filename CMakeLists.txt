@@ -12,7 +12,6 @@ idf_component_register(
         "lwip"
         "freertos"
         "esp_netif"
-        "esp-tls"
         "my-background"
     PRIV_REQUIRES           #[[ 只在.cc中用到的组件 ]]
         "my-sysinfo"
