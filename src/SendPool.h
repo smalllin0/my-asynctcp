@@ -4,9 +4,8 @@
 
 #include "my_linklist.h"
 #include <cstdint>
+#include "sdkconfig.h"
 
-
-#define CONFIG_MAX_NOCOPY_CHUNKS 16
 
 class AsyncConnection;
 
@@ -77,7 +76,7 @@ private:
     SendPool& operator=(SendPool&&) = delete;
     SendPool& operator=(const SendPool&) = delete;
 
-    MyList<Chunk, CONFIG_MAX_NOCOPY_CHUNKS> pool_;   // 发送缓冲区链表
+    MyList<Chunk, CONFIG_SEND_POOL_CHUNK> pool_;   // 发送缓冲区链表
 };
 
 #endif /* MY_ASYNC_TCP_SEND_POOL_H_ */

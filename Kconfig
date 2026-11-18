@@ -1,7 +1,16 @@
-menu "my_AsyncTCP"
+menu "MyAsyncTcp组件配置"
     config SERVER_BACKLOG_LEN
         int "服务器监听时，等待连接最大长度"
         default 32
+    
+    config SEND_POOL_CHUNK
+        int "发送管理缓冲区数量"
+        default 24
+        range 16 32
+        help 
+            "所有连接共享的发送管理缓冲区数量"
+            "发送缓冲区仅管理发送数据，不存储数据"
+
     config CONNECT_TIMEOUT
         int "客户端连接等待超时（秒）"
         default 10
