@@ -11,31 +11,6 @@
 
 #include "lwip/pbuf.h"
 
-/// @brief 从 RxBuffer 中取走的一条 pbuf 链
-/// @note head/offset 表示从 head 链的第 offset 字节开始，
-///       注意，其每个节点的tot_len不一定正确！！！！
-///       之类的接口读取，读取完毕后调用 FreePbuf 释放。
-struct Buffer {
-    struct pbuf* head{nullptr}; // 缓冲区头节点
-    size_t offset{0};           // 缓冲区头节点起始读偏移
-    size_t len{0};              // 有效数据总长度
-
-    Buffer() = default;
-
-    Buffer(struct pbuf* p, size_t off, size_t l)
-        : head(p), offset(off), len(l) {}
-
-    /// @brief 释放 pbuf
-    /// @note 需在 LWIP 线程中调用
-    void FreePbuf() {
-        if (head) {
-            pbuf_free(head);
-            head = nullptr;
-        }
-        offset = 0;
-        len = 0;
-    }
-};
 
 struct RxBufferLink {
 
@@ -65,22 +40,17 @@ struct RxBufferLink {
         return total_len;
     }
 
-    bool Empty() const {
-        std::lock_guard<std::mutex> lock(mutex);
-        return total_len == 0;
-    }
 
     /// @brief 获取一条 pbuf 数据链
+    /// @param p pbuf链头指针存放位置的引用
+    /// @param len pbuf链头的长度，不要相信tot_len!!!
     /// @note 取出后由调用者通过 Buffer::FreePbuf 释放
-    bool GetPbuf(struct Buffer* buf) {
-        if (!buf) return false;
-
+    bool GetPbuf(struct pbuf*& p, size_t& len) {
         std::lock_guard<std::mutex> lock(mutex);
         if (!rx_head) return false;
 
-        buf->head = rx_head;
-        buf->len = total_len;
-        buf->offset = cur_offset;
+        p = rx_head;
+        len = total_len;
 
         rx_head = nullptr;
         rx_tail = nullptr;
@@ -103,7 +73,7 @@ struct RxBufferLink {
 
     /// @brief 接收一个 pbuf 数据
     /// @note 只能由 LwIP / 生产者线程调用
-    void PushAll(struct pbuf* p) {
+    void PushBack(struct pbuf* p) {
         if (!p) return;
 
         std::lock_guard<std::mutex> lock(mutex);
@@ -124,12 +94,6 @@ struct RxBufferLink {
         return PeekUnLock(dst, len);
     }
 
-    /// @brief 丢弃指定大小的数据
-    /// @note 只能由消费线程调用
-    void Drop(size_t n) {
-        std::lock_guard<std::mutex> lock(mutex);
-        DropUnLock(n);
-    }
 
     void DropAll() {
         std::lock_guard<std::mutex> lock(mutex);
