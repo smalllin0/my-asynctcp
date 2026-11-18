@@ -13,6 +13,7 @@
 
 class AsyncServer;
 class AsyncConnection;
+struct RxBufferLink;
 
 // ============================================================
 // 回调类型
@@ -131,18 +132,21 @@ private:
     void HandleConnectEvent();
     void HandleSentEvent(uint16_t len);
     void HandleConnectResult(err_t err);
+    void TryCreateRecvTask();
 
     // ---------------------------------------------------------
     // 数据成员
     // ---------------------------------------------------------
+    struct RxBufferLink*            buffer_link_{nullptr};      // 接收数据缓冲链
 
     std::atomic<size_t>             events_{0};
-    std::atomic<size_t>             ack_rx_bytes_{0};         // 已经接收完成字节数
+    std::atomic<size_t>             ack_rx_bytes_{0};           // 已经接收完成字节数
     uint32_t                        last_rx_ms_;
     uint32_t                        last_tx_ms_;
     uint32_t                        ack_timeout_ms_;
     uint16_t                        rx_timeout_second_{0};
     bool                            nodelay_{false};
+    std::atomic<bool>               recv_processing_{false};
     tcp_pcb*                        pcb_{nullptr};
     std::atomic<ConnectionState>    state_{ConnectionState::k_Idle};
 
