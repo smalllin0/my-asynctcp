@@ -18,6 +18,21 @@
 
 
 
+/// @brief 接收数据交付方式
+enum class RxMode_t : uint8_t {
+    kStream = 0,        // 推送：RecvTask 把整条 pbuf 链交给 on_data_
+    kPull,              // 拉取：只入缓冲，由持有者用 Read()/Peek() 按长度取（适配 TLS/BIO）
+};
+void AsyncConnection::SetRxMode(RxMode_t mode)
+{
+    rx_mode_.store(mode, std::memory_order_release);
+
+    // 切成拉取要立刻补一次唤醒：AcceptTask 之前到达的字节已经躺在
+    // buffer_link_ 里了（那时 on_data_ 还是空，RecvTask 取不走），
+    // 没有这次唤醒就要等下一个报文或 500ms 的 poll 才会被处理。
+    if (mode == RxMode_t::kPull) TryCreateRecvTask();
+}
+
 // -------------------------------------------------------------
 // 发送完成任务
 // -------------------------------------------------------------
@@ -68,39 +83,47 @@ protected:
 /// @brief 尝试创建1个数据接收处理任务
 void AsyncConnection::TryCreateRecvTask()
 {
-    if (recv_processing_.exchange(true, std::memory_order_acq_rel)) {
-        // 已有任务在处理，无需重复调度（它会顺手把新数据一起处理）
-        return; 
-    }
+    // 已有任务在处理，无需重复调度（它会顺手把新数据一起处理）
+    if (recv_processing_.exchange(true, std::memory_order_acq_rel)) return;
+  
 
     IncPending();
     auto ok = MyBackground::GetInstance().Schedule(
         "TcpRecv",
         [](void* ctx) {
             auto* conn = static_cast<AsyncConnection*>(ctx);
-            Buffer buffer;
-            if( conn->on_data_ && conn->buffer_link_->GetPbuf(&buffer)) {
-                auto* current = buffer.head;
-                if (buffer.offset != 0) {
-                    void* src = (uint8_t*)current->payload + buffer.offset;
-                    size_t len = current->len - buffer.offset;
-                    conn->on_data_(conn->on_data_arg_, src, len);
-                    current = current->next;
-                }
+
+            // 拉取模式：只当门铃。字节留在 buffer_link_ 里，由持有者
+            // 通过 Read()/Peek() 按长度取走（mbedtls 的 BIO 语义）。
+            if (conn->rx_mode_.load(std::memory_order_acquire) == RxMode_t::kPull) {
+                if (conn->on_rx_wake_) conn->on_rx_wake_(conn->on_rx_wake_arg_);
+                return;
+            }
+
+            // 推送模式：整条 pbuf 链交给业务层
+            struct pbuf* buffer = nullptr;
+            size_t total = 0;
+            if( conn->on_data_ && conn->buffer_link_->GetPbuf(buffer, total)) {
+                // kPull不会转变为kStream模式，因此offset一定是0,链是完整的
+                auto* current = buffer;
                 while (current) {
                     conn->on_data_(conn->on_data_arg_, current->payload, current->len);
                     current = current->next;
                 }
             }
-            conn->ack_rx_bytes_.fetch_add(buffer.len, std::memory_order_acq_rel);
-            conn->buffer_link_->PushBackToFree(buffer.head);
+            conn->ack_rx_bytes_.fetch_add(total, std::memory_order_acq_rel);
+            conn->buffer_link_->PushBackToFree(buffer);
         },
         [](void* c, bool) {
             auto* self = static_cast<AsyncConnection*>(c);
             self->recv_processing_.store(false, std::memory_order_release);
 
-            // 主动判定是否需要重新调度新的后台处理任务
-            if (self->on_data_ && self->buffer_link_->Size() != 0) {
+            // 主动判定是否需要重新调度新的后台处理任务。
+            // 只对流模式成立：kPull 下 buffer 里剩下的必然是"半条记录"，
+            // mbedtls 会一直 WANT_READ，按 Size()!=0 续跑就是纯自旋。
+            // 拉取的再唤醒由「新数据到达」(HandleReceiveEvent) 或 poll 负责。
+            if (self->rx_mode_.load(std::memory_order_acquire) == RxMode_t::kStream
+                && self->on_data_ && self->buffer_link_->Size() != 0) {
                 self->TryCreateRecvTask();
             }
 
@@ -255,6 +278,7 @@ AsyncConnection::~AsyncConnection()
     on_poll_    = nullptr;
     on_release_ = nullptr;
     on_drain_   = nullptr;
+    on_rx_wake_ = nullptr;
 
     // ── 5. 清理缓冲区
     delete buffer_link_;
@@ -389,6 +413,10 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     events_.store(0, std::memory_order_release);
     ack_rx_bytes_.store(0, std::memory_order_release);
 
+    // 默认流模式。直接 store，不走 SetRxMode —— 后者在 kPull 时会投递唤醒任务，
+    // 而此刻 pcb 回调还没挂好，不该有任何任务进来。
+    rx_mode_.store(RxMode_t::kStream, std::memory_order_relaxed);
+
     // 清空业务回调
     on_connect_     = nullptr;
     on_error_       = nullptr;
@@ -396,6 +424,7 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     on_poll_        = nullptr;
     on_release_     = nullptr;
     on_drain_       = nullptr;
+    on_rx_wake_     = nullptr;
 
     // 清空业务回调参数
     on_connect_arg_ = nullptr;
@@ -404,6 +433,7 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     on_poll_arg_    = nullptr;
     on_release_arg_ = nullptr;
     on_drain_arg_   = nullptr;
+    on_rx_wake_arg_ = nullptr;
 
     // 注册 LWIP 回调
     tcp_arg(pcb_, this);
@@ -506,9 +536,10 @@ void AsyncConnection::Init(tcp_pcb* pcb)
 
 void AsyncConnection::HandleReceiveEvent(pbuf* pb)
 {
-    if (buffer_link_->Empty()) last_rx_ms_ = SystemInfo::GetMsSinceStart();  // 不准确，但没关系
+    // 刷新数据接收时间（尽管部分旧数据未及时处理）
+    last_rx_ms_ = SystemInfo::GetMsSinceStart();  
 
-    buffer_link_->PushAll(pb);
+    buffer_link_->PushBack(pb);
 
     TryCreateRecvTask();
 }
@@ -660,6 +691,67 @@ size_t AsyncConnection::Flush()
     });
 
     return msg.size;
+}
+
+
+// =============================================================
+// 拉取接口（kPull）
+// =============================================================
+
+/// @brief 已缓冲的可读字节数
+size_t AsyncConnection::Available() const
+{
+    return buffer_link_ ? buffer_link_->Size() : 0;
+}
+
+/// @brief 只读不取
+size_t AsyncConnection::Peek(void* dst, size_t len) const
+{
+    if (!buffer_link_) return 0;
+    return buffer_link_->Peek(dst, len);
+}
+
+/// @brief 读走最多 len 字节
+/// @note 只推进读指针并累加待 ACK 字节；tcp_recved 交给 FlushAck()。
+///       这样一次解密循环里读几十次也只换一次线程上下文。
+size_t AsyncConnection::Read(void* dst, size_t len)
+{
+    if (!buffer_link_ || !dst || len == 0) return 0;
+
+    size_t got = buffer_link_->Pop(dst, len);
+    if (got) ack_rx_bytes_.fetch_add(got, std::memory_order_acq_rel);
+    return got;
+}
+
+/// @brief 把累积的待 ACK 字节刷给 lwip
+size_t AsyncConnection::FlushAck()
+{
+    struct AckMsg {
+        AsyncConnection* conn;
+        size_t           acked;
+    };
+    AckMsg msg{this, 0};
+
+    LwipApiCall(&msg, [](void* ctx) {
+        auto& m = *static_cast<AckMsg*>(ctx);
+
+        auto& pcb = m.conn->pcb_;
+        if (!pcb) return;
+
+        // 与 tcp_recv / tcp_poll 里同一套写法：一次最多认 64K，
+        // 溢出的部分塞回去等下一次刷。
+        auto want = m.conn->ack_rx_bytes_.exchange(0, std::memory_order_acq_rel);
+        if (want == 0) return;
+
+        auto bytes = static_cast<uint16_t>(std::min<size_t>(want, 0xFFFFu));
+        if (bytes < want) {
+            m.conn->ack_rx_bytes_.fetch_add(want - bytes, std::memory_order_acq_rel);
+        }
+        tcp_recved(pcb, bytes);
+        m.acked = bytes;
+    });
+
+    return msg.acked;
 }
 
 

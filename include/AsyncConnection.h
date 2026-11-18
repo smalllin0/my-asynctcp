@@ -14,6 +14,8 @@
 class AsyncServer;
 class AsyncConnection;
 struct RxBufferLink;
+enum class RxMode_t : uint8_t;
+
 
 // ============================================================
 // 回调类型
@@ -35,6 +37,11 @@ using ReleaseCb     = void (*)(void* arg);
 ///       在 SentTask 后台线程调用，回调里可调 Append/Flush
 ///       不能在回调里调 erase_if（与 SentTask 内部遍历冲突）
 using DrainCb       = void (*)(void* arg);
+
+/// @brief 拉取模式的数据到达唤醒回调
+/// @note 不带字节：数据留在 buffer_link_ 里，由持有者用 Read()/Peek() 取走。
+///       在 MyBackground 后台线程调用，回调里可以调 Read/FlushAck。
+using RxWakeCb      = void (*)(void* arg);
 
 // ============================================================
 // AsyncConnection
@@ -60,18 +67,12 @@ using DrainCb       = void (*)(void* arg);
 ///     2. SendPool 中本连接无 chunk（数据已发完）
 ///     3. events_ == 0（无后台任务正在访问）
 ///   任一不满足，关闭推迟到下一个后台任务析构时再试
-class AsyncConnection;
 class AsyncConnection : public PoolNode<AsyncConnection> {
 public:
     struct SentTask;
-    struct RecvTask;
     struct ErrTask;
     struct PollTask;
 
-    friend struct SentTask;
-    friend struct RecvTask;
-    friend struct ErrTask;
-    friend struct PollTask;
 
 public:
     AsyncConnection();
@@ -106,13 +107,37 @@ public:
     /// @brief 这是一个空实现，只为兼容旧接口
     void SetDeferAck(bool defer) {}
 
-    void OnConnect(ConnectCb cb, void* arg = nullptr) { on_connect_ = cb; on_connect_arg_ = arg; }
+    // void OnConnect(ConnectCb cb, void* arg = nullptr) { on_connect_ = cb; on_connect_arg_ = arg; }
     void OnError(ErrorCb cb, void* arg = nullptr)     { on_error_   = cb; on_error_arg_   = arg; }
     void OnData(DataCb cb, void* arg = nullptr)       { on_data_    = cb; on_data_arg_    = arg; }
     void OnPoll(PollCb cb, void* arg = nullptr)       { on_poll_    = cb; on_poll_arg_    = arg; }
     void OnRelease(ReleaseCb cb, void* arg)           { on_release_ = cb; on_release_arg_ = arg; }
     /// @brief 连接数据发送完成回调
     void OnDrain(DrainCb cb, void* arg = nullptr)     { on_drain_   = cb; on_drain_arg_   = arg; }
+    /// @brief 拉取模式的数据到达唤醒回调
+    void OnRxWake(RxWakeCb cb, void* arg = nullptr)   { on_rx_wake_ = cb; on_rx_wake_arg_ = arg; }
+
+    // ---------------------------------------------------------
+    // 接收模式 / 拉取接口
+    // ---------------------------------------------------------
+
+    /// @brief 设置接收交付方式
+    /// @note 约定在连接建立后、数据流开始前设置一次；
+    ///       切成 kPull 会立刻补一次唤醒，把之前已缓冲的字节交给持有者。
+    void SetRxMode(RxMode_t mode);
+    RxMode_t GetRxMode() const { return rx_mode_.load(std::memory_order_acquire); }
+
+    /// @brief 已缓冲的可读字节数（两种模式都可用，主要给 kPull 判断够不够一整条记录）
+    size_t Available() const;
+    /// @brief 只读不取
+    size_t Peek(void* dst, size_t len) const;
+    /// @brief 读走最多 len 字节；推进读指针、累加待 ACK 字节，但**不立刻** tcp_recved
+    /// @note 返回 0 表示暂无数据（不阻塞）。取走之后请调用 FlushAck()
+    size_t Read(void* dst, size_t len);
+    /// @brief 把累积的待 ACK 字节刷给 lwip
+    /// @return 本次确认的字节数
+    /// @pre 非 tcpip 线程（内部 LwipApiCall 切线程，从 tcpip 线程调用会死锁）
+    size_t FlushAck();
 
 private:
     friend class AsyncServer;
@@ -139,15 +164,16 @@ private:
     // ---------------------------------------------------------
     struct RxBufferLink*            buffer_link_{nullptr};      // 接收数据缓冲链
 
+    tcp_pcb*                        pcb_{nullptr};
     std::atomic<size_t>             events_{0};
     std::atomic<size_t>             ack_rx_bytes_{0};           // 已经接收完成字节数
     uint32_t                        last_rx_ms_;
     uint32_t                        last_tx_ms_;
     uint32_t                        ack_timeout_ms_;
     uint16_t                        rx_timeout_second_{0};
+    std::atomic<RxMode_t>           rx_mode_;                   // 接收交付方式
     bool                            nodelay_{false};
     std::atomic<bool>               recv_processing_{false};
-    tcp_pcb*                        pcb_{nullptr};
     std::atomic<ConnectionState>    state_{ConnectionState::k_Idle};
 
     ConnectCb       on_connect_{nullptr};       void* on_connect_arg_{nullptr};
@@ -156,6 +182,7 @@ private:
     PollCb          on_poll_{nullptr};          void* on_poll_arg_{nullptr};
     ReleaseCb       on_release_{nullptr};       void* on_release_arg_{nullptr};
     DrainCb         on_drain_{nullptr};         void* on_drain_arg_{nullptr};
+    RxWakeCb        on_rx_wake_{nullptr};       void* on_rx_wake_arg_{nullptr};
 };
 
 #endif  // MY_ASYNC_CONNECTION_H_
