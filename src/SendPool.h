@@ -9,7 +9,8 @@
 
 class AsyncConnection;
 
-using CompeleteCb      = void (*) (void* ctx, size_t sent);
+// CompeleteCb 定义在 AsyncConnection.h（Append 是公开 API，参数类型不能藏在私有头）
+#include "AsyncConnection.h"
 struct Chunk{
     AsyncConnection*    conn;   // 关联的连接
     const void*         data;   // 数据源
@@ -40,10 +41,22 @@ struct Chunk{
     }
 };
 
-/// @brief 
-/// @note 由于在Lwip的所有回调中，没有碰该池的操作，
-///       因此，该池有锁但是是由单一线程操作的
-///     （LwipApiCall可以认为在后台线程在操作的），不会出现锁竞争
+/// @brief 全局发送管理池（所有连接共享，容量 CONFIG_SEND_POOL_CHUNK）
+/// @note 只存"发送管理块"（Chunk：指针 + 长度 + 已发/已确认游标），
+///       不存数据本身；数据由调用方的 Append 传入并保持有效。
+///
+/// 【线程模型】
+///   lwip 的 recv / sent / poll 回调都不碰本池，只有三条路径会：
+///     - 业务线程：Append（入池）
+///     - tcpip 线程：Flush 里经 LwipApiCall 遍历并 tcp_write（业务线程同步等返回）
+///     - 后台线程：SentHandler / PollHandler 里 Ack、ErrorHandler 里 Clear
+///   前两者与后者确实会并发，由 MyList 内部的 std::mutex 串行化：每次
+///   公共方法都在锁内完成，临界区只有链表的指针改写与一次遍历。
+///   注意 ForEach 的**整个遍历**都在锁内 —— 回调里不能再调本池的任何
+///   方法（std::mutex 不可重入），也不能 erase_if（同轮遍历冲突）。
+///   唯一在 tcpip 线程里调 Clear 的是 tcp_err 的兜底分支（Pend 入队失败）：
+///   那条路径上连接已经废了，宁可冒一次"Chunk 析构回调在 tcpip 线程执行"
+///   的风险，也不让 chunk 永久占池并持有已回收的连接。
 class SendPool {
 public:
     

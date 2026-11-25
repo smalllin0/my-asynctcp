@@ -11,17 +11,18 @@ menu "MyAsyncTcp组件配置"
             "所有连接共享的发送管理缓冲区数量"
             "发送缓冲区仅管理发送数据，不存储数据"
 
-    config CONNECT_TIMEOUT
-        int "客户端连接等待超时（秒）"
-        default 10
-        help 
-            "服务器在指定时间内无法处理时拒绝连接"
-    config ASYNC_MAX_ACK_TIME
-        int "设置ACK应答时间（毫秒）"
-        default 5000
     config CONNECTION_CLEAN_TIME
         int "连接清理时间（秒）"
         default 30
         help 
             "连接会在指定的时间内进行重用"
+
+    config CONNECTION_POOL_KEEP
+        int "池收缩后保留的空闲连接数"
+        default 1
+        range 0 16
+        help
+            收缩只保留这么多个空闲对象，其余析构并还内存。
+            0 表示每次收缩都清空空闲对象（下次连接需要重新分配）。
+            注意：收缩只动空闲对象，正在用的连接不受影响。
 endmenu

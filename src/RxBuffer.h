@@ -25,9 +25,10 @@ struct RxBufferLink {
     mutable std::mutex mutex;
 
     /// @brief 重置状态
-    /// @note 不释放已有 pbuf，调用前应保证链表为空或由调用者处理
+    /// @note 调用前应保证链表为空或由调用者处理
     bool Init() {
         std::lock_guard<std::mutex> lock(mutex);
+        if (free_head) return false;
         rx_head = rx_tail = nullptr;
         free_head = free_tail = nullptr;
         total_len = 0;

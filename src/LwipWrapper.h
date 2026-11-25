@@ -10,13 +10,8 @@
 
 
 
-extern err_t LwipConnect(tcp_pcb* pcb, const ip_addr_t* ip, u16_t port, void* ctx, err_t (*cb)(void*, tcp_pcb*, err_t));
-
 extern err_t LwipApiCall(void* ctx, void(*fn)(void* ctx));
 
 extern void LwipRawClose(tcp_pcb*& pcb);
 
-extern err_t LwipDnsResolve(const char* hostname, ip_addr_t* addr, void* arg,
-                     void (*found)(const char*, const ip_addr_t*, void*));
-                        
 #endif /* MY_ASYNC_TCP_LWIPWRAPPER_H_ */

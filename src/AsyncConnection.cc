@@ -4,246 +4,41 @@
 // =============================================================
 
 #include "AsyncConnection.h"
+#include "ConnPool.h"
 #include "AsyncServer.h"
 #include "my_sysInfo.h"
 #include "esp_log.h"
 #include "LwipWrapper.h"
-#include "lwip/dns.h"
-#include "ConnectionPool.h"
 #include "RxBuffer.h"
+#include "SendPool.h"
 
 #define TAG "AsyncConnection"
 
 #define CONFIG_ASYNC_POLL_TIME  1
 
 
-
-/// @brief 接收数据交付方式
-enum class RxMode_t : uint8_t {
-    kStream = 0,        // 推送：RecvTask 把整条 pbuf 链交给 on_data_
-    kPull,              // 拉取：只入缓冲，由持有者用 Read()/Peek() 按长度取（适配 TLS/BIO）
-};
+/// @brief 设置数据接收处理模式
 void AsyncConnection::SetRxMode(RxMode_t mode)
 {
     rx_mode_.store(mode, std::memory_order_release);
 
-    // 切成拉取要立刻补一次唤醒：AcceptTask 之前到达的字节已经躺在
-    // buffer_link_ 里了（那时 on_data_ 还是空，RecvTask 取不走），
-    // 没有这次唤醒就要等下一个报文或 500ms 的 poll 才会被处理。
-    if (mode == RxMode_t::kPull) TryCreateRecvTask();
+    // 切成拉取要立刻按一次门铃：AcceptTask 之前到达的字节已经在 
+    // buffer_link_ 中，避免要等待 poll 或下一次报文才处理。
+    if (mode == RxMode_t::kPull) Pend(kWorkRecv);
 }
 
-// -------------------------------------------------------------
-// 发送完成任务
-// -------------------------------------------------------------
-struct AsyncConnection::SentTask : BgTask {
-    struct Data {
-        AsyncConnection*    conn;
-        uint16_t            len;
-        uint32_t            time;
-    };
-
-    SentTask(AsyncConnection* c, uint16_t l, uint32_t t) {
-        emplace<Data>(c, l, t);
-    }
-
-    ~SentTask() override {
-        auto* d = get<Data>();
-        if (!d) return;
-        auto* conn = d->conn;
-
-        conn->DecPending();
-        conn->TryClose();
-        conn->TryRelease();
-    }
-
-protected:
-    void Run() override {
-        auto* d = get<Data>();
-        if (!d) return;
-        auto* conn = d->conn;
-
-        SendPool::GetInstance().Ack(conn, d->len);
-
-        if (!SendPool::GetInstance().HasChunk(conn)) {
-            // 池空 —— 通知业务层这批已 ACK
-            if (conn->on_drain_) {
-                conn->on_drain_(conn->on_drain_arg_);
-            }
-        } else {
-            conn->Flush();
-        }
-    }
-};
-
-// -------------------------------------------------------------
-// 数据接收任务
-// -------------------------------------------------------------
-
-/// @brief 尝试创建1个数据接收处理任务
-void AsyncConnection::TryCreateRecvTask()
+/// @brief 标记需处理事件
+bool AsyncConnection::Pend(uint32_t bits)
 {
-    // 已有任务在处理，无需重复调度（它会顺手把新数据一起处理）
-    if (recv_processing_.exchange(true, std::memory_order_acq_rel)) return;
-  
+    if (!bits) return true;
 
-    IncPending();
-    auto ok = MyBackground::GetInstance().Schedule(
-        "TcpRecv",
-        [](void* ctx) {
-            auto* conn = static_cast<AsyncConnection*>(ctx);
+    work_.fetch_or(bits, std::memory_order_release);
 
-            // 拉取模式：只当门铃。字节留在 buffer_link_ 里，由持有者
-            // 通过 Read()/Peek() 按长度取走（mbedtls 的 BIO 语义）。
-            if (conn->rx_mode_.load(std::memory_order_acquire) == RxMode_t::kPull) {
-                if (conn->on_rx_wake_) conn->on_rx_wake_(conn->on_rx_wake_arg_);
-                return;
-            }
+    const ConnOwner* owner = owner_;
+    if (!owner) return false;
 
-            // 推送模式：整条 pbuf 链交给业务层
-            struct pbuf* buffer = nullptr;
-            size_t total = 0;
-            if( conn->on_data_ && conn->buffer_link_->GetPbuf(buffer, total)) {
-                // kPull不会转变为kStream模式，因此offset一定是0,链是完整的
-                auto* current = buffer;
-                while (current) {
-                    conn->on_data_(conn->on_data_arg_, current->payload, current->len);
-                    current = current->next;
-                }
-            }
-            conn->ack_rx_bytes_.fetch_add(total, std::memory_order_acq_rel);
-            conn->buffer_link_->PushBackToFree(buffer);
-        },
-        [](void* c, bool) {
-            auto* self = static_cast<AsyncConnection*>(c);
-            self->recv_processing_.store(false, std::memory_order_release);
-
-            // 主动判定是否需要重新调度新的后台处理任务。
-            // 只对流模式成立：kPull 下 buffer 里剩下的必然是"半条记录"，
-            // mbedtls 会一直 WANT_READ，按 Size()!=0 续跑就是纯自旋。
-            // 拉取的再唤醒由「新数据到达」(HandleReceiveEvent) 或 poll 负责。
-            if (self->rx_mode_.load(std::memory_order_acquire) == RxMode_t::kStream
-                && self->on_data_ && self->buffer_link_->Size() != 0) {
-                self->TryCreateRecvTask();
-            }
-
-            self->DecPending();
-            self->TryClose();
-            self->TryRelease();
-        },
-        this);
-
-    if (!ok) {
-        // 调度失败，回滚状态位
-        recv_processing_.store(false, std::memory_order_release);
-        DecPending();
-    }
+    return owner->Wake();
 }
-
-// -------------------------------------------------------------
-// 错误处理任务
-// -------------------------------------------------------------
-struct AsyncConnection::ErrTask : BgTask {
-    struct Data {
-        AsyncConnection*    conn;
-        err_t               err;
-    };
-
-    ErrTask(AsyncConnection* c, err_t e) {
-        emplace<Data>(c, e);
-    }
-
-    ~ErrTask() override {
-        auto* d = get<Data>();
-        if (!d) return;
-
-        auto* conn = d->conn;
-        // rx 缓冲里的 pbuf 已在 tcp_err 回调（tcpip 线程）里还掉；
-        // 这里只负责 SendPool —— 它无锁、且 Chunk 析构会回调业务层，
-        SendPool::GetInstance().Clear(conn);       
-
-        conn->DecPending();
-        // tcp_err 路径下 state 已经是 k_Closed（pcb 已 null），
-        // TryClose 不会动作，TryRelease 负责回收
-        conn->TryClose();
-        conn->TryRelease();
-    }
-
-protected:
-    void Run() override {
-        auto* d = get<Data>();
-        if (!d) return;
-
-        auto* conn = d->conn;
-        if (conn->on_error_ != nullptr) {
-            conn->on_error_(conn->on_error_arg_, d->err);
-        }
-    }
-};
-
-// -------------------------------------------------------------
-// 轮询任务（tcp_poll 触发）
-// -------------------------------------------------------------
-struct AsyncConnection::PollTask : BgTask {
-    struct Data {
-        AsyncConnection*    conn;
-        uint32_t            time;
-    };
-
-    PollTask(AsyncConnection* c, uint32_t t) {
-        emplace<Data>(c, t);
-    }
-
-    ~PollTask() override {
-        auto* d = get<Data>();
-        if (!d) return;
-
-        auto* conn = d->conn;
-        conn->DecPending();
-        conn->TryClose();
-        conn->TryRelease();
-    }
-
-protected:
-    void Run() override {
-        auto* d = get<Data>();
-        if (!d) return;
-
-        auto* conn = d->conn;
-
-        if (conn->rx_timeout_second_ &&
-            SystemInfo::Timeout(conn->last_rx_ms_, d->time,
-                                conn->rx_timeout_second_ * 1000)) {
-            conn->Close();
-            ESP_LOGD(TAG, "Receive timeout, connection closed.");
-        }
-
-        // ── 兜底推进 ──
-        // 响应推进只有两个事件源：tcp_sent（→ OnDrain）和本 poll。
-        // 若首片 Append 就因为全局 chunk 池满返回 false，一个字节都没进 lwip，
-        // 就永远不会有 tcp_sent —— 这条连接自此既不收也不发。而 send() 又把
-        // rx 超时关成了 0、Close() 对 k_HalfClosedLocal 是早退，于是它只能
-        // 一直占着 pcb，攒够了 accept 就彻底停摆。这里用 500ms 的 poll 把
-        // "本连接池为空" 这个条件重新驱动一次，语义与 SentTask 里那次完全
-        // 等价（两者都在后台线程执行，天然串行，不会重入）。
-        // 只在 k_Established 上驱动：finish() 会先把状态切走再删 response，
-        // 用状态做闸门可以避免在删除之后碰到悬空的 on_drain_。
-        if (conn->on_drain_
-            && conn->state_.load(std::memory_order_acquire) == ConnectionState::k_Established
-            && !SendPool::GetInstance().HasChunk(conn)) {
-            conn->on_drain_(conn->on_drain_arg_);
-        }
-
-        if (conn->on_poll_) {
-            conn->on_poll_(conn->on_poll_arg_);
-        }
-    }
-};
-
-
-// =============================================================
-// 构造 / 析构
-// =============================================================
 
 AsyncConnection::AsyncConnection()
 {
@@ -252,11 +47,11 @@ AsyncConnection::AsyncConnection()
 
 AsyncConnection::~AsyncConnection()
 {
-    // ── 1. 兜底清 SendPool ──
+    // 1. 清 SendPool
     SendPool::GetInstance().Clear(this);
 
-    // ── 2. 兜底清 pcb ──
-    if (pcb_) ESP_LOGW(TAG, "~AsyncConnection: pcb not null, force abort");
+    // 2. 清 pcb
+    if (pcb_) ESP_LOGW(TAG, "析构时发现 pcb 非空，强制断开连接");
     LwipApiCall(this, [](void* ctx) {
         auto* conn = static_cast<AsyncConnection*>(ctx);
         auto& pcb = conn->pcb_;
@@ -265,13 +60,13 @@ AsyncConnection::~AsyncConnection()
         LwipRawClose(pcb);
     });
 
-    // ── 3. 断言 events_ == 0 ──
+    // 3. events_检测
     if (events_.load(std::memory_order_acquire) != 0) {
         ESP_LOGE(TAG, "~AsyncConnection: events_=%u, UAF",
                  (unsigned)events_.load());
     }
 
-    // ── 4. 清业务回调（防止悬空指针被误用） ──
+    // 4. 清空业务回调
     on_connect_ = nullptr;
     on_error_   = nullptr;
     on_data_    = nullptr;
@@ -280,42 +75,37 @@ AsyncConnection::~AsyncConnection()
     on_drain_   = nullptr;
     on_rx_wake_ = nullptr;
 
-    // ── 5. 清理缓冲区
+    // 5. 清理缓冲区
     delete buffer_link_;
 }
-
-
-// =============================================================
-// 生命周期与状态
-// =============================================================
 
 /// @brief 尝试真正关闭连接（执行 tcp_close）
 /// @pre 非 tcpip 线程
 /// @note 三条件同时满足才执行 tcp_close：
-///   1. state ∈ {k_HalfClosedLocal, k_Closing}
+///   1. state 为 {k_HalfClosedLocal, k_Closing}
 ///   2. SendPool 池空
 ///   3. events_ == 0
 void AsyncConnection::TryClose()
 {
     auto s = state_.load(std::memory_order_acquire);
 
-    // ---- 前置 1：状态 ----
+    // 1. 连接状态判定
     if (s != ConnectionState::k_HalfClosedLocal
         && s != ConnectionState::k_Closing) {
         return;
     }
 
-    // ---- 前置 2：SendPool 池空 ----
+    // 2. SendPool 池空
     if (SendPool::GetInstance().HasChunk(this)) {
         return;
     }
 
-    // ---- 前置 3：events_ == 0 ----
+    // 3. events_ == 0
     if (events_.load(std::memory_order_acquire) != 0) {
         return;
     }
 
-    // ---- 条件齐备，执行真实关闭 ----
+    // 4. 执行 tcp_close
     LwipApiCall(this, [](void* ctx) {
         auto* conn = static_cast<AsyncConnection*>(ctx);
         auto& pcb = conn->pcb_;
@@ -328,7 +118,7 @@ void AsyncConnection::TryClose()
 
     TransitionTo(ConnectionState::k_Closed);
 
-    // events_ 已确定 == 0，立即回收
+    // 立即回收
     TryRelease();
 }
 
@@ -343,15 +133,50 @@ void AsyncConnection::TryRelease()
         return;
     }
 
+    if (released_.exchange(true, std::memory_order_acq_rel)) return;
+
     if (on_release_) on_release_(on_release_arg_);
 
+    // 持有者先摘掉
+    owner_ = nullptr;
+
     TransitionTo(ConnectionState::k_Recycled);
-    ConnectionPool::GetInstance().Release(this);
+
+    // 不再直接进 free 链：先挂 defer 链，等下一个取用者（或收缩前）
+    // 由 CommitRecycle 搬回。归还者的调用栈可能还在用这个对象，
+    // 立刻可复用就是自己改自己。
+    ConnPool::GetInstance().DeferRecycle(this);
 }
 
+/// @brief 切换连接状态
 void AsyncConnection::TransitionTo(ConnectionState s) noexcept
 {
     state_.store(s, std::memory_order_release);
+}
+
+/// @brief 断开槽阕连接
+/// @note 归还池时调用：只清位，槽位信息留着给下次复用
+void AsyncConnection::DetachSlot() noexcept
+{
+    if (registry_ && slot_.Valid()) registry_->Detach(this);
+}
+
+/// @brief 释放连接槽位
+/// @note 连接销毁时调用：清位，槽位信息也清掉
+void AsyncConnection::ReleaseSlot() noexcept
+{
+    if (registry_ && slot_.Valid()) registry_->UnRegister(this);
+}
+
+/// @brief 停服：推进一步关闭，并且不再等 ACK
+/// @note 顺序：先 Close 让状态机进入 Closing，再清 SendPool ——
+///       不清的话 TryClose 会卡在"池里有 chunk"这一条前置上，而停服之后
+///       已经没有人会来消费 tcp_sent 了，永远等不到池空。
+void AsyncConnection::Shutdown()
+{
+    Close();
+    SendPool::GetInstance().Clear(this);
+    TryClose();
 }
 
 /// @brief 是否允许追加数据
@@ -375,20 +200,8 @@ bool AsyncConnection::CanFlush()
         || s == ConnectionState::k_Closing;
 }
 
-/// @brief 是否允许接收数据
-bool AsyncConnection::CanReceive()
-{
-    auto s = state_.load(std::memory_order_acquire);
-    return s == ConnectionState::k_Established
-        || s == ConnectionState::k_HalfClosedLocal;
-}
-
-
-// =============================================================
-// 初始化（在 LWIP 线程内运行）
-// =============================================================
-
-void AsyncConnection::Init(tcp_pcb* pcb)
+/// @brief 初始化（在 LWIP 线程内运行）
+void AsyncConnection::Init(tcp_pcb* pcb, ConnRegistry* registry, const ConnOwner* owner)
 {
 
     if (buffer_link_->Size() != 0) {
@@ -396,26 +209,26 @@ void AsyncConnection::Init(tcp_pcb* pcb)
     }
     buffer_link_->DropAll();
     buffer_link_->PbufFree();
-
     buffer_link_->Init();
 
-    // 上一条命遗留的接收状态位必须复位，否则新连接第一条数据就取不出来
-    recv_processing_.store(false, std::memory_order_release);
+    work_.store(0, std::memory_order_release);
+    ack_tx_bytes_.store(0, std::memory_order_release);
+    err_code_.store(ERR_OK, std::memory_order_release);
 
     last_rx_ms_         = SystemInfo::GetMsSinceStart();
-    last_tx_ms_         = last_rx_ms_;
-    // ack_timeout_ms_     = CONFIG_ASYNC_MAX_ACK_TIME;
     rx_timeout_second_  = 0;
     nodelay_            = false;
     pcb_                = pcb;
+    registry_           = registry;  
+    owner_              = owner;     
 
     state_.store(ConnectionState::k_Initialized, std::memory_order_release);
     events_.store(0, std::memory_order_release);
+    released_.store(false, std::memory_order_release);
     ack_rx_bytes_.store(0, std::memory_order_release);
 
-    // 默认流模式。直接 store，不走 SetRxMode —— 后者在 kPull 时会投递唤醒任务，
-    // 而此刻 pcb 回调还没挂好，不该有任何任务进来。
-    rx_mode_.store(RxMode_t::kStream, std::memory_order_relaxed);
+    // 默认流模式。
+    rx_mode_.store(RxMode_t::kPush, std::memory_order_relaxed);
 
     // 清空业务回调
     on_connect_     = nullptr;
@@ -458,24 +271,11 @@ void AsyncConnection::Init(tcp_pcb* pcb)
             auto s = conn->state_.load(std::memory_order_acquire);
             if (s == ConnectionState::k_HalfClosedLocal) {
                 conn->TransitionTo(ConnectionState::k_Closing);
-                // 投递一个空任务来触发 TryClose（tcp_recv 在 tcpip 线程内，
-                // 不能直接 LwipApiCall；空任务的析构里 DecPending + TryClose）
-                conn->IncPending();
-                auto ok = MyBackground::GetInstance().Schedule(
-                    "TcpFin",
-                    [](void* /*c*/) { /* no-op */ },
-                    [](void* c, bool) {
-                        auto* self = static_cast<AsyncConnection*>(c);
-                        self->DecPending();
-                        self->TryClose();
-                        self->TryRelease();
-                    },
-                    conn);
-                if (!ok) conn->DecPending();
+                conn->Pend(kWorkClose);
             } else if (s == ConnectionState::k_Established) {
                 conn->TransitionTo(ConnectionState::k_HalfClosedRemote);
             }
-            // k_Closing / k_Closed 不动 —— 不降级
+            // k_Closing / k_Closed 不降级
         }
         return ERR_OK;
     });
@@ -495,16 +295,10 @@ void AsyncConnection::Init(tcp_pcb* pcb)
 
         conn->TransitionTo(ConnectionState::k_Closed);
 
-        conn->IncPending();
-        auto ok = MyBackground::GetInstance().Schedule<ErrTask>(
-            "TcpError", conn, err);
-        if (!ok) {
-            conn->DecPending();
-            // 正常路径下 SendPool::Clear 由 ErrTask 析构在后台线程做；
-            // 只有这里调度失败（队列满）才退化为就地清理 —— 池本身无锁，
-            // 且 Chunk 析构会回调业务层，不该在 tcpip 线程常态执行，
-            // 但漏清理会让 chunk 永久占着池并持有已回收的 conn 指针，
-            // 两害相权只能在异常路径上认这一次。
+        // 错误码寄存在连接上
+        conn->err_code_.store(err, std::memory_order_release);
+
+        if (!conn->Pend(kWorkError)) {
             SendPool::GetInstance().Clear(conn);
             conn->TryRelease();
         }
@@ -523,17 +317,12 @@ void AsyncConnection::Init(tcp_pcb* pcb)
         }
         // ack 为 0 时也可能攒下了待释放 pbuf
         conn->buffer_link_->PbufFree();
-        conn->TryCreateRecvTask();
         conn->HandlePollEvent();
         return ERR_OK;
     }, CONFIG_ASYNC_POLL_TIME);
 }
 
-
-// =============================================================
-// lwip 事件回调入口（在 lwip 线程内被调用）
-// =============================================================
-
+/// @brief lwip 接收事件回调
 void AsyncConnection::HandleReceiveEvent(pbuf* pb)
 {
     // 刷新数据接收时间（尽管部分旧数据未及时处理）
@@ -541,58 +330,30 @@ void AsyncConnection::HandleReceiveEvent(pbuf* pb)
 
     buffer_link_->PushBack(pb);
 
-    TryCreateRecvTask();
+    Pend(kWorkRecv);
 }
 
+/// @brief lwip 轮询事件回调
 void AsyncConnection::HandlePollEvent()
 {
-    IncPending();
-    auto ok = MyBackground::GetInstance().Schedule<PollTask>(
-        "TcpPoll", this, SystemInfo::GetMsSinceStart());
-    if (!ok) DecPending();
+    // Poll ：
+    // 1. 置 kWorkPoll 让扫描做超时判定与兜底重驱动；
+    // 2. 补一次 kWorkRecv：万一某个连接"数据到达"那次的入队失败
+    // （后台队列满），500ms 内一定还有一次重试，不至于永久滞留。
+    Pend(kWorkPoll | kWorkRecv);
 }
 
-void AsyncConnection::HandleConnectEvent()
-{
-    last_rx_ms_ = SystemInfo::GetMsSinceStart();
-
-    IncPending();
-    auto ok = MyBackground::GetInstance().Schedule(
-        "Connected",
-        [](void* ctx) {
-            auto* conn = static_cast<AsyncConnection*>(ctx);
-            conn->last_rx_ms_ = SystemInfo::GetMsSinceStart();
-            conn->TransitionTo(ConnectionState::k_Established);
-            if (conn->on_connect_) {
-                conn->on_connect_(conn->on_connect_arg_, conn);
-            }
-        },
-        [](void* ctx, bool /*was_run*/) {
-            auto* conn = static_cast<AsyncConnection*>(ctx);
-            conn->DecPending();
-            conn->TryClose();
-            conn->TryRelease();
-        },
-        this);
-    if (!ok) DecPending();
-}
-
+/// @brief lwip 发送完成事件回调
 void AsyncConnection::HandleSentEvent(uint16_t len)
 {
-    IncPending();
-    auto ok = MyBackground::GetInstance().Schedule<SentTask>(
-        "TcpSent", this, len,
-        SystemInfo::GetMsSinceStart() - last_tx_ms_);
-    if (!ok) DecPending();
+    // 只累计，不在这里摊到发送块上：Ack 可能触发 on_drain_（业务回调），
+    // 不能在 tcpip 线程里做。扫描的 SentHandler 取走时一次性 Ack 这批字节。
+    ack_tx_bytes_.fetch_add(len, std::memory_order_acq_rel);
+    Pend(kWorkSent);
 }
 
-
-
-// =============================================================
-// 关闭
-//    @note 函数不能在 LWIP 中调用，否则会死锁
-// =============================================================
-
+/// @brief 关闭连接
+/// @note 只是开始关闭运用，函数返回不代表已经关闭
 void AsyncConnection::Close()
 {
     auto s = state_.load(std::memory_order_acquire);
@@ -619,10 +380,13 @@ void AsyncConnection::Close()
 }
 
 
-// =============================================================
-// 发送接口
-// =============================================================
-
+/// @brief 发送接口
+/// @param data 待发数据
+/// @param len 数据长度
+/// @param apiflags 发送标识
+/// @param cb 发送结束回调
+/// @param ctx 发送结束回调参数
+/// @return true仅代表成功添加进入发送队列，不代表数据已经发送成功
 bool AsyncConnection::Append(const void* data, size_t len, uint8_t apiflags,
                              CompeleteCb cb, void* ctx)
 {
@@ -693,27 +457,16 @@ size_t AsyncConnection::Flush()
     return msg.size;
 }
 
-
-// =============================================================
-// 拉取接口（kPull）
-// =============================================================
-
-/// @brief 已缓冲的可读字节数
-size_t AsyncConnection::Available() const
-{
-    return buffer_link_ ? buffer_link_->Size() : 0;
-}
-
-/// @brief 只读不取
+/// @brief 不推进读指针，不累加待 ACK 字节
+/// @note kPull模式接口
 size_t AsyncConnection::Peek(void* dst, size_t len) const
 {
     if (!buffer_link_) return 0;
     return buffer_link_->Peek(dst, len);
 }
 
-/// @brief 读走最多 len 字节
-/// @note 只推进读指针并累加待 ACK 字节；tcp_recved 交给 FlushAck()。
-///       这样一次解密循环里读几十次也只换一次线程上下文。
+/// @brief 拉取最多 len 字节（只推进读指针并累加待 ACK 字节）
+/// @note kPull模式接口
 size_t AsyncConnection::Read(void* dst, size_t len)
 {
     if (!buffer_link_ || !dst || len == 0) return 0;
@@ -755,32 +508,14 @@ size_t AsyncConnection::FlushAck()
 }
 
 
-// =============================================================
-// 引用计数
-// =============================================================
-
+/// @brief 连接发生事件时，增加引用计数
 void AsyncConnection::DecPending()
 {
-    events_.fetch_sub(1, std::memory_order_acq_rel);
+    events_.fetch_sub(1, std::memory_order_relaxed);
 }
 
+/// @brief 连接发生事件时，减少引用计数
 void AsyncConnection::IncPending()
 {
     events_.fetch_add(1, std::memory_order_relaxed);
-}
-
-
-/// @brief 官房端连接结果处理
-void AsyncConnection::HandleConnectResult(err_t err)
-{
-    if (err == ERR_OK) {
-        HandleConnectEvent();
-        return;
-    }
-    pcb_ = nullptr;
-    SendPool::GetInstance().Clear(this);
-    TransitionTo(ConnectionState::k_Closed);
-    IncPending();
-    auto ok = MyBackground::GetInstance().Schedule<ErrTask>("ConnErr", this, err);
-    if (!ok) { DecPending(); TryRelease(); }
 }
